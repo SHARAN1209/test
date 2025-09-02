@@ -65,4 +65,17 @@ spring.jpa.hibernate.ddl-auto=none
 spring.jpa.defer-datasource-initialization=true
 spring.sql.init.mode=always
 
+package com.example.demo.config;
+
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.data.jpa.repository.config.EnableJpaRepositories;
+import org.springframework.transaction.annotation.EnableTransactionManagement;
+
+@Configuration
+@EnableJpaRepositories(basePackages = "com.example.demo.repository")
+@EnableTransactionManagement
+public class DatabaseConfig {
+    // Configuration for database initialization
+} 
 
