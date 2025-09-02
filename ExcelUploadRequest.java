@@ -56,5 +56,13 @@ VALUES (
     'Sample table for testing purposes',
     'test, sample'
 );
+# File Upload Configuration
+spring.servlet.multipart.max-file-size=10MB
+spring.servlet.multipart.max-request-size=10MB
+
+# Database Initialization
+spring.jpa.hibernate.ddl-auto=none
+spring.jpa.defer-datasource-initialization=true
+spring.sql.init.mode=always
 
 
