@@ -31,3 +31,30 @@ curl --location 'http://localhost:8080/tables/TABLE2/versions' \
 --form 'groups="admin"' \
 --form 'user="admin.user"'
 
+-- Sample data for LookUpTableEntity
+INSERT INTO ruleapp_table_information (table_name, key_columns, notes, downloadable_by_groups, uploadable_by_groups, bulk_upload_form, lookup_description, lookup_categories) 
+VALUES (
+    'TABLE2',
+    '["code"]',
+    'Sample table for testing Excel upload',
+    '["admin", "viewer"]',
+    '["admin", "uploader"]',
+    '[
+    {
+        "excel_column_name": "Code",
+        "column_name": "code",
+        "regex_pattern": "^[A-Z]{3}[0-9]{3}$",
+        "cast_to": "string"
+    },
+    {
+        "excel_column_name": "Description",
+        "column_name": "description",
+        "regex_pattern": "^[A-Za-z0-9 ]+$",
+        "cast_to": "string"
+    }
+]',
+    'Sample table for testing purposes',
+    'test, sample'
+);
+
+
