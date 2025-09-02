@@ -25,3 +25,9 @@ public class ExcelUploadRequest {
                     .body(Map.of("error", e.getMessage()));
         }
     }
+
+curl --location 'http://localhost:8080/tables/TABLE2/versions' \
+--form 'file=@"/C:/Users/2127859/Downloads/Book 22.xlsx"' \
+--form 'groups="admin"' \
+--form 'user="admin.user"'
+
