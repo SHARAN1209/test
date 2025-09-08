@@ -251,3 +251,72 @@ class RuleappDAOImplTest {
         assertEquals(ErrorCode.UNAUTHORIZED_DOWNLOAD_ACCESS, ex.getErrorCode());
     }
 }
+
+
+// 1) Left side of (A || B) true: downloadableByGroups == null (short-circuits)
+@Test
+void testGetItems_Unauthorized_LeftOperandTrue_DownloadableGroupsNull() throws Exception {
+    LookUpTableEntity t = new LookUpTableEntity();
+    t.setTableName("testTable");
+    t.setDownloadableByGroups(null); // triggers A == true
+
+    when(lookUpTableRepository.findByTableName("testTable")).thenReturn(Optional.of(t));
+
+    RuleAppServiceException ex = assertThrows(RuleAppServiceException.class,
+            () -> ruleappDAO.getItems("testTable", "v1", List.of("group1")));
+
+    assertEquals(ErrorCode.UNAUTHORIZED_DOWNLOAD_ACCESS, ex.getErrorCode());
+}
+
+// 2) Left false, right true: userGroups == null (forces evaluation of right operand)
+@Test
+void testGetItems_Unauthorized_RightOperandTrue_UserGroupsNull() throws Exception {
+    LookUpTableEntity t = new LookUpTableEntity();
+    t.setTableName("testTable");
+    t.setDownloadableByGroups("[\"group1\"]"); // left operand false
+
+    when(lookUpTableRepository.findByTableName("testTable")).thenReturn(Optional.of(t));
+
+    // userGroups is null -> right operand true
+    RuleAppServiceException ex = assertThrows(RuleAppServiceException.class,
+            () -> ruleappDAO.getItems("testTable", "v1", null));
+
+    assertEquals(ErrorCode.UNAUTHORIZED_DOWNLOAD_ACCESS, ex.getErrorCode());
+}
+
+// 3) Both operands false -> try-block runs, but anyMatch() == false (no overlap)
+@Test
+void testGetItems_Unauthorized_NoMatchingGroup_AnyMatchFalse() throws Exception {
+    LookUpTableEntity t = new LookUpTableEntity();
+    t.setTableName("testTable");
+    t.setDownloadableByGroups("[\"group1\",\"group2\"]");
+
+    when(lookUpTableRepository.findByTableName("testTable")).thenReturn(Optional.of(t));
+    when(objectMapper.readValue(eq("[\"group1\",\"group2\"]"), any(TypeReference.class)))
+            .thenReturn(List.of("group1", "group2")); // allowed groups present
+
+    // Provide user group with no overlap -> anyMatch -> false
+    RuleAppServiceException ex = assertThrows(RuleAppServiceException.class,
+            () -> ruleappDAO.getItems("testTable", "v1", List.of("other")));
+
+    assertEquals(ErrorCode.UNAUTHORIZED_DOWNLOAD_ACCESS, ex.getErrorCode());
+}
+
+// 4) Exception path in try -> catch returns false
+@Test
+void testGetItems_Unauthorized_InvalidJson_CatchFalse() throws Exception {
+    LookUpTableEntity t = new LookUpTableEntity();
+    t.setTableName("testTable");
+    t.setDownloadableByGroups("[\"group1\"]");
+
+    when(lookUpTableRepository.findByTableName("testTable")).thenReturn(Optional.of(t));
+    when(objectMapper.readValue(anyString(), any(TypeReference.class)))
+            .thenThrow(new RuntimeException("bad json"));
+
+    RuleAppServiceException ex = assertThrows(RuleAppServiceException.class,
+            () -> ruleappDAO.getItems("testTable", "v1", List.of("group1")));
+
+    assertEquals(ErrorCode.UNAUTHORIZED_DOWNLOAD_ACCESS, ex.getErrorCode());
+}
+
+
