@@ -1,0 +1,243 @@
+package com.bakerhughes.ruleapp.service.impl;
+
+import com.bakerhughes.ruleapp.dto.LookUpTableResponse;
+import com.bakerhughes.ruleapp.dto.RuleAppTableVersionResponse;
+import com.bakerhughes.ruleapp.entity.LookUpTableEntity;
+import com.bakerhughes.ruleapp.entity.RuleAppTableVersionEntity;
+import com.bakerhughes.ruleapp.entity.RuleappHistoricalDataEntity;
+import com.bakerhughes.ruleapp.exception.ErrorCode;
+import com.bakerhughes.ruleapp.exception.RuleAppServiceException;
+import com.bakerhughes.ruleapp.mapper.RuleAppServiceMapper;
+import com.bakerhughes.ruleapp.repository.LookUpTableRepository;
+import com.bakerhughes.ruleapp.repository.RuleAppTableVersionRepository;
+import com.bakerhughes.ruleapp.repository.RuleappHistoricalDataRepository;
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
+
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.*;
+import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.http.HttpStatus;
+
+import java.util.*;
+
+import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.Mockito.*;
+
+@ExtendWith(MockitoExtension.class)
+class RuleappDAOImplTest {
+
+    @InjectMocks
+    private RuleappDAOImpl ruleappDAO;
+
+    @Mock
+    private LookUpTableRepository lookUpTableRepository;
+
+    @Mock
+    private RuleAppTableVersionRepository ruleAppTableVersionRepository;
+
+    @Mock
+    private RuleappHistoricalDataRepository ruleappHistoricalDataRepository;
+
+    @Mock
+    private RuleAppServiceMapper ruleAppServiceMapper;
+
+    @Mock
+    private ObjectMapper objectMapper;
+
+    private LookUpTableEntity tableEntity;
+    private RuleAppTableVersionEntity versionEntity;
+    private RuleappHistoricalDataEntity historicalDataEntity;
+
+    @BeforeEach
+    void setUp() {
+        tableEntity = new LookUpTableEntity();
+        tableEntity.setTableName("testTable");
+        tableEntity.setDownloadableByGroups("[\"group1\",\"group2\"]");
+
+        versionEntity = new RuleAppTableVersionEntity();
+        versionEntity.setTableId("testTable");
+
+        historicalDataEntity = new RuleappHistoricalDataEntity();
+        historicalDataEntity.setTableId("testTable");
+        historicalDataEntity.setVersion("v1");
+        historicalDataEntity.setRecord("[{\"key\":\"value\"}]");
+    }
+
+    // -------------------------
+    // getTablesByGroups Tests
+    // -------------------------
+    @Test
+    void testGetTablesByGroups_Success() {
+        List<LookUpTableEntity> entities = List.of(tableEntity);
+        List<LookUpTableResponse> responseList = List.of(new LookUpTableResponse());
+
+        when(lookUpTableRepository.findByGroups(anyList())).thenReturn(entities);
+        when(ruleAppServiceMapper.mapTableInformationsToResponse(entities)).thenReturn(responseList);
+
+        List<LookUpTableResponse> result = ruleappDAO.getTablesByGroups(List.of("group1"));
+
+        assertEquals(1, result.size());
+        verify(lookUpTableRepository, times(1)).findByGroups(anyList());
+    }
+
+    @Test
+    void testGetTablesByGroups_NotFound() {
+        when(lookUpTableRepository.findByGroups(anyList())).thenReturn(Collections.emptyList());
+
+        RuleAppServiceException exception = assertThrows(RuleAppServiceException.class, 
+            () -> ruleappDAO.getTablesByGroups(List.of("group1")));
+
+        assertEquals(ErrorCode.TABLES_NOT_FOUND, exception.getErrorCode());
+        assertEquals(HttpStatus.NOT_FOUND, exception.getStatus());
+    }
+
+    // -------------------------
+    // getVersions Tests
+    // -------------------------
+    @Test
+    void testGetVersions_Admin_Success() {
+        List<RuleAppTableVersionEntity> entities = List.of(versionEntity);
+
+        when(ruleAppTableVersionRepository.findByTableIdOrderByValidityStartDesc("testTable"))
+            .thenReturn(entities);
+        when(ruleAppServiceMapper.mapTableVersionsToResponse(entities))
+            .thenReturn(List.of(new RuleAppTableVersionResponse()));
+
+        List<RuleAppTableVersionResponse> result = ruleappDAO.getVersions("testTable", true);
+
+        assertEquals(1, result.size());
+    }
+
+    @Test
+    void testGetVersions_NonAdmin_ReturnsLatestOnly() {
+        RuleAppTableVersionEntity v1 = new RuleAppTableVersionEntity();
+        RuleAppTableVersionEntity v2 = new RuleAppTableVersionEntity();
+        List<RuleAppTableVersionEntity> entities = List.of(v1, v2);
+
+        when(ruleAppTableVersionRepository.findByTableIdOrderByValidityStartDesc("testTable"))
+            .thenReturn(entities);
+        when(ruleAppServiceMapper.mapTableVersionsToResponse(anyList()))
+            .thenReturn(List.of(new RuleAppTableVersionResponse()));
+
+        List<RuleAppTableVersionResponse> result = ruleappDAO.getVersions("testTable", false);
+
+        assertEquals(1, result.size());
+        verify(ruleAppServiceMapper).mapTableVersionsToResponse(eq(List.of(v1)));
+    }
+
+    @Test
+    void testGetVersions_NotFound() {
+        when(ruleAppTableVersionRepository.findByTableIdOrderByValidityStartDesc("testTable"))
+            .thenReturn(Collections.emptyList());
+
+        RuleAppServiceException exception = assertThrows(RuleAppServiceException.class,
+            () -> ruleappDAO.getVersions("testTable", true));
+
+        assertEquals(ErrorCode.TABLE_NOT_FOUND, exception.getErrorCode());
+        assertEquals(HttpStatus.NOT_FOUND, exception.getStatus());
+    }
+
+    // -------------------------
+    // getItems Tests
+    // -------------------------
+    @Test
+    void testGetItems_Success() throws Exception {
+        when(lookUpTableRepository.findByTableName("testTable")).thenReturn(Optional.of(tableEntity));
+        when(objectMapper.readValue(eq("[\"group1\",\"group2\"]"), any(TypeReference.class)))
+            .thenReturn(List.of("group1", "group2"));
+
+        when(ruleappHistoricalDataRepository.findByTableIdAndVersion("testTable", "v1"))
+            .thenReturn(historicalDataEntity);
+
+        ObjectMapper localObjectMapper = new ObjectMapper();
+        List<Map<String, Object>> expected = localObjectMapper.readValue(historicalDataEntity.getRecord(),
+                new TypeReference<List<Map<String, Object>>>() {});
+        // No need to mock readValue for record since we instantiate a new ObjectMapper internally
+
+        List<Map<String, Object>> result = ruleappDAO.getItems("testTable", "v1", List.of("group1"));
+
+        assertEquals(expected.size(), result.size());
+    }
+
+    @Test
+    void testGetItems_TableNotFound() {
+        when(lookUpTableRepository.findByTableName("testTable")).thenReturn(Optional.empty());
+
+        RuleAppServiceException exception = assertThrows(RuleAppServiceException.class,
+            () -> ruleappDAO.getItems("testTable", "v1", List.of("group1")));
+
+        assertEquals(ErrorCode.TABLE_NOT_FOUND, exception.getErrorCode());
+    }
+
+    @Test
+    void testGetItems_UnauthorizedAccess() throws Exception {
+        when(lookUpTableRepository.findByTableName("testTable")).thenReturn(Optional.of(tableEntity));
+        when(objectMapper.readValue(eq("[\"group1\",\"group2\"]"), any(TypeReference.class)))
+            .thenReturn(List.of("group2"));
+
+        // User does not have permission (passing empty user group)
+        RuleAppServiceException exception = assertThrows(RuleAppServiceException.class,
+            () -> ruleappDAO.getItems("testTable", "v1", List.of("unauthorizedGroup")));
+
+        assertEquals(ErrorCode.UNAUTHORIZED_DOWNLOAD_ACCESS, exception.getErrorCode());
+        assertEquals(HttpStatus.UNAUTHORIZED, exception.getStatus());
+    }
+
+    @Test
+    void testGetItems_VersionNotFound() throws Exception {
+        when(lookUpTableRepository.findByTableName("testTable")).thenReturn(Optional.of(tableEntity));
+        when(objectMapper.readValue(eq("[\"group1\",\"group2\"]"), any(TypeReference.class)))
+            .thenReturn(List.of("group1"));
+
+        when(ruleappHistoricalDataRepository.findByTableIdAndVersion("testTable", "v1"))
+            .thenReturn(null);
+
+        RuleAppServiceException exception = assertThrows(RuleAppServiceException.class,
+            () -> ruleappDAO.getItems("testTable", "v1", List.of("group1")));
+
+        assertEquals(ErrorCode.VERSIONS_NOT_FOUND, exception.getErrorCode());
+    }
+
+    // -------------------------
+    // hasDownloadPermission Tests
+    // -------------------------
+    @Test
+    void testHasDownloadPermission_ValidGroups() throws Exception {
+        when(objectMapper.readValue(eq("[\"group1\"]"), any(TypeReference.class)))
+            .thenReturn(List.of("group1"));
+
+        boolean result = ruleappDAO
+            .getClass()
+            .getDeclaredMethod("hasDownloadPermission", String.class, List.class)
+            .invoke(ruleappDAO, "[\"group1\"]", List.of("group1"))
+            .equals(true);
+
+        assertTrue(result);
+    }
+
+    @Test
+    void testHasDownloadPermission_NullParams() throws Exception {
+        boolean result = (boolean) ruleappDAO
+            .getClass()
+            .getDeclaredMethod("hasDownloadPermission", String.class, List.class)
+            .invoke(ruleappDAO, null, null);
+
+        assertFalse(result);
+    }
+
+    @Test
+    void testHasDownloadPermission_JsonParseFailure() throws Exception {
+        when(objectMapper.readValue(anyString(), any(TypeReference.class)))
+            .thenThrow(new RuntimeException("JSON parse error"));
+
+        boolean result = (boolean) ruleappDAO
+            .getClass()
+            .getDeclaredMethod("hasDownloadPermission", String.class, List.class)
+            .invoke(ruleappDAO, "[\"group1\"]", List.of("group1"));
+
+        assertFalse(result);
+    }
+}
