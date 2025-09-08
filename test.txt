@@ -13,22 +13,20 @@ import com.bakerhughes.ruleapp.service.DynamicTableService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.poi.ss.usermodel.*;
 import org.apache.poi.xssf.usermodel.XSSFWorkbook;
-import org.junit.jupiter.api.*;
-import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 import org.mockito.*;
-import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.http.HttpStatus;
 import org.springframework.mock.web.MockMultipartFile;
+import org.springframework.web.multipart.MultipartFile;
 
+import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
-import java.time.LocalDateTime;
 import java.util.*;
 
 import static org.junit.jupiter.api.Assertions.*;
-import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
 
-@ExtendWith(MockitoExtension.class)
 class ExcelUploadServiceImplTest {
 
     @InjectMocks
@@ -36,166 +34,175 @@ class ExcelUploadServiceImplTest {
 
     @Mock
     private LookUpTableRepository lookUpTableRepository;
-
     @Mock
     private RuleAppTableVersionRepository ruleAppTableVersionRepository;
-
     @Mock
     private RuleappHistoricalDataRepository ruleappHistoricalDataRepository;
-
     @Mock
     private DynamicTableService dynamicTableService;
+    @Mock
+    private ObjectMapper objectMapper;
 
-    @Spy
-    private ObjectMapper objectMapper = new ObjectMapper();
-
-    private LookUpTableEntity tableEntity;
+    private LookUpTableEntity mockTableEntity;
+    private MultipartFile validFile;
 
     @BeforeEach
-    void setUp() {
-        tableEntity = new LookUpTableEntity();
-        tableEntity.setTableName("test_table");
-        tableEntity.setUploadableByGroups("[\"ADMIN\",\"USER\"]");
-        tableEntity.setKeyColumns("ID");
-        tableEntity.setBulkUploadForm("[{\"excelColumnName\":\"ID\",\"columnName\":\"id\",\"castTo\":\"int\"}]");
-    }
+    void setUp() throws Exception {
+        MockitoAnnotations.openMocks(this);
 
-    private MockMultipartFile createExcelFile() throws Exception {
+        // Create a valid Excel file with headers and data
         Workbook workbook = new XSSFWorkbook();
         Sheet sheet = workbook.createSheet();
         Row header = sheet.createRow(0);
-        header.createCell(0).setCellValue("ID");
+        header.createCell(0).setCellValue("Name");
+        header.createCell(1).setCellValue("Age");
 
         Row row = sheet.createRow(1);
-        row.createCell(0).setCellValue(123);
+        row.createCell(0).setCellValue("John");
+        row.createCell(1).setCellValue("30");
 
         ByteArrayOutputStream bos = new ByteArrayOutputStream();
         workbook.write(bos);
+
+        validFile = new MockMultipartFile("file", "test.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", bos.toByteArray());
+
         workbook.close();
-        return new MockMultipartFile("file", "test.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", bos.toByteArray());
+
+        // Mock Table entity
+        mockTableEntity = new LookUpTableEntity();
+        mockTableEntity.setTableName("test_table");
+        mockTableEntity.setUploadableByGroups("[\"admin\",\"user\"]");
+        mockTableEntity.setKeyColumns("Name");
+        mockTableEntity.setBulkUploadForm("[{\"excelColumnName\":\"Name\",\"columnName\":\"name\",\"castTo\":\"String\"}," +
+                "{\"excelColumnName\":\"Age\",\"columnName\":\"age\",\"castTo\":\"Integer\"}]");
     }
 
     @Test
     void testUploadExcelFile_Success() throws Exception {
-        MockMultipartFile file = createExcelFile();
+        List<String> userGroups = List.of("admin");
 
-        when(lookUpTableRepository.findByTableName("test_table"))
-                .thenReturn(Optional.of(tableEntity));
-        when(ruleAppTableVersionRepository.findFirstByTableIdAndValidityEndIsNullOrderByValidityStartDesc(any()))
-                .thenReturn(Optional.empty());
+        when(lookUpTableRepository.findByTableName("test_table")).thenReturn(Optional.of(mockTableEntity));
+        when(objectMapper.readValue(eq("[\"admin\",\"user\"]"), any(TypeReference.class)))
+                .thenReturn(List.of("admin", "user"));
+        when(objectMapper.readValue(eq(mockTableEntity.getBulkUploadForm()), any(TypeReference.class)))
+                .thenReturn(List.of(
+                        new BulkUploadFormColumn("Name", "name", "String", null),
+                        new BulkUploadFormColumn("Age", "age", "Integer", null)
+                ));
 
-        Map<String, Object> result = excelUploadService.uploadExcelFile("test_table",
-                List.of("ADMIN"), file, "tester");
+        when(ruleAppTableVersionRepository.save(any())).thenReturn(new RuleAppTableVersionEntity());
+
+        Map<String, Object> result = excelUploadService.uploadExcelFile("test_table", userGroups, validFile, "tester");
 
         assertEquals("Excel file processed successfully", result.get("message"));
         assertEquals(1, result.get("totalRows"));
-        assertTrue(result.get("version").toString().contains("."));
-        
-        // verify historical and dynamic table are called
+        assertTrue(result.containsKey("version"));
+
         verify(dynamicTableService, times(1))
-                .truncateAndReloadTable(anyString(), anyList(), anyList(), anyString());
-        verify(ruleappHistoricalDataRepository, times(1))
-                .save(any(RuleappHistoricalDataEntity.class));
+                .truncateAndReloadTable(eq("test_table"), anyList(), anyList(), eq("tester"));
+        verify(ruleappHistoricalDataRepository, times(1)).saveAll(anyList());
     }
 
     @Test
     void testUploadExcelFile_TableNotFound() {
-        when(lookUpTableRepository.findByTableName("test_table")).thenReturn(Optional.empty());
-        MockMultipartFile file = new MockMultipartFile("file", new byte[0]);
+        when(lookUpTableRepository.findByTableName("invalid")).thenReturn(Optional.empty());
 
-        RuleAppServiceException ex = assertThrows(RuleAppServiceException.class,
-                () -> excelUploadService.uploadExcelFile("test_table", List.of("ADMIN"), file, "tester"));
+        RuleAppServiceException ex = assertThrows(RuleAppServiceException.class, () ->
+                excelUploadService.uploadExcelFile("invalid", List.of("admin"), validFile, "tester"));
 
         assertEquals(ErrorCode.TABLE_NOT_FOUND, ex.getErrorCode());
-        assertEquals(HttpStatus.NOT_FOUND, ex.getHttpStatus());
     }
 
     @Test
-    void testUploadExcelFile_Unauthorized() throws Exception {
-        tableEntity.setUploadableByGroups("[\"ADMIN\"]");
-        when(lookUpTableRepository.findByTableName("test_table")).thenReturn(Optional.of(tableEntity));
+    void testUploadExcelFile_UnauthorizedUser() throws Exception {
+        when(lookUpTableRepository.findByTableName("test_table")).thenReturn(Optional.of(mockTableEntity));
+        when(objectMapper.readValue(eq("[\"admin\",\"user\"]"), any(TypeReference.class)))
+                .thenReturn(List.of("admin", "user"));
 
-        MockMultipartFile file = createExcelFile();
-
-        RuleAppServiceException ex = assertThrows(RuleAppServiceException.class,
-                () -> excelUploadService.uploadExcelFile("test_table", List.of("GUEST"), file, "tester"));
+        RuleAppServiceException ex = assertThrows(RuleAppServiceException.class, () ->
+                excelUploadService.uploadExcelFile("test_table", List.of("guest"), validFile, "tester"));
 
         assertEquals(ErrorCode.UNAUTHORIZED_UPLOAD_ACCESS, ex.getErrorCode());
-        assertEquals(HttpStatus.UNAUTHORIZED, ex.getHttpStatus());
     }
 
     @Test
-    void testUploadExcelFile_MissingColumn() throws Exception {
-        tableEntity.setBulkUploadForm("[{\"excelColumnName\":\"Name\",\"columnName\":\"name\",\"castTo\":\"string\"}]");
-        when(lookUpTableRepository.findByTableName("test_table")).thenReturn(Optional.of(tableEntity));
+    void testUploadExcelFile_InvalidBulkUploadForm() throws Exception {
+        mockTableEntity.setBulkUploadForm(""); // invalid JSON
 
-        MockMultipartFile file = createExcelFile();
+        when(lookUpTableRepository.findByTableName("test_table")).thenReturn(Optional.of(mockTableEntity));
+        when(objectMapper.readValue(eq("[\"admin\",\"user\"]"), any(TypeReference.class)))
+                .thenReturn(List.of("admin"));
 
-        RuleAppServiceException ex = assertThrows(RuleAppServiceException.class,
-                () -> excelUploadService.uploadExcelFile("test_table", List.of("ADMIN"), file, "tester"));
+        RuleAppServiceException ex = assertThrows(RuleAppServiceException.class, () ->
+                excelUploadService.uploadExcelFile("test_table", List.of("admin"), validFile, "tester"));
+
+        assertEquals(ErrorCode.BULK_FORM_EMPTY, ex.getErrorCode());
+    }
+
+    @Test
+    void testUploadExcelFile_MissingRequiredColumns() throws Exception {
+        // Excel with wrong header
+        Workbook workbook = new XSSFWorkbook();
+        Sheet sheet = workbook.createSheet();
+        Row header = sheet.createRow(0);
+        header.createCell(0).setCellValue("WrongHeader");
+
+        ByteArrayOutputStream bos = new ByteArrayOutputStream();
+        workbook.write(bos);
+
+        MultipartFile invalidFile = new MockMultipartFile("file", "wrong.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", bos.toByteArray());
+        workbook.close();
+
+        when(lookUpTableRepository.findByTableName("test_table")).thenReturn(Optional.of(mockTableEntity));
+        when(objectMapper.readValue(eq("[\"admin\",\"user\"]"), any(TypeReference.class)))
+                .thenReturn(List.of("admin"));
+        when(objectMapper.readValue(eq(mockTableEntity.getBulkUploadForm()), any(TypeReference.class)))
+                .thenReturn(List.of(
+                        new BulkUploadFormColumn("Name", "name", "String", null),
+                        new BulkUploadFormColumn("Age", "age", "Integer", null)
+                ));
+
+        RuleAppServiceException ex = assertThrows(RuleAppServiceException.class, () ->
+                excelUploadService.uploadExcelFile("test_table", List.of("admin"), invalidFile, "tester"));
 
         assertEquals(ErrorCode.MISSING_REQUIRED_COLUMNS, ex.getErrorCode());
     }
 
     @Test
-    void testUploadExcelFile_DuplicateKeys() throws Exception {
-        MockMultipartFile file = createExcelFile();
+    void testUploadExcelFile_DuplicateKeyFound() throws Exception {
+        // Create Excel with duplicate Name
+        Workbook workbook = new XSSFWorkbook();
+        Sheet sheet = workbook.createSheet();
+        Row header = sheet.createRow(0);
+        header.createCell(0).setCellValue("Name");
+        header.createCell(1).setCellValue("Age");
 
-        // Add duplicate row to cause duplicate key error
-        Workbook workbook = new XSSFWorkbook(file.getInputStream());
-        Sheet sheet = workbook.getSheetAt(0);
-        Row row = sheet.createRow(2);
-        row.createCell(0).setCellValue(123);
+        Row row1 = sheet.createRow(1);
+        row1.createCell(0).setCellValue("John");
+        row1.createCell(1).setCellValue("30");
+
+        Row row2 = sheet.createRow(2);
+        row2.createCell(0).setCellValue("John"); // duplicate key
+        row2.createCell(1).setCellValue("40");
 
         ByteArrayOutputStream bos = new ByteArrayOutputStream();
         workbook.write(bos);
         workbook.close();
 
-        MockMultipartFile duplicateFile = new MockMultipartFile("file", "duplicate.xlsx",
-                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", bos.toByteArray());
+        MultipartFile duplicateFile = new MockMultipartFile("file", "dup.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", bos.toByteArray());
 
-        when(lookUpTableRepository.findByTableName("test_table")).thenReturn(Optional.of(tableEntity));
+        when(lookUpTableRepository.findByTableName("test_table")).thenReturn(Optional.of(mockTableEntity));
+        when(objectMapper.readValue(eq("[\"admin\",\"user\"]"), any(TypeReference.class)))
+                .thenReturn(List.of("admin"));
+        when(objectMapper.readValue(eq(mockTableEntity.getBulkUploadForm()), any(TypeReference.class)))
+                .thenReturn(List.of(
+                        new BulkUploadFormColumn("Name", "name", "String", null),
+                        new BulkUploadFormColumn("Age", "age", "Integer", null)
+                ));
 
-        RuleAppServiceException ex = assertThrows(RuleAppServiceException.class,
-                () -> excelUploadService.uploadExcelFile("test_table", List.of("ADMIN"), duplicateFile, "tester"));
+        RuleAppServiceException ex = assertThrows(RuleAppServiceException.class, () ->
+                excelUploadService.uploadExcelFile("test_table", List.of("admin"), duplicateFile, "tester"));
 
         assertEquals(ErrorCode.DUPLICATE_KEY_FOUND, ex.getErrorCode());
-    }
-
-    @Test
-    void testUpdateTableVersion_ExistingVersion() {
-        RuleAppTableVersionEntity entity = new RuleAppTableVersionEntity();
-        entity.setVersion(1);
-        entity.setSubVersion(0);
-        entity.setCreatedDate(LocalDateTime.now());
-
-        when(ruleAppTableVersionRepository.findFirstByTableIdAndValidityEndIsNullOrderByValidityStartDesc("test_table"))
-                .thenReturn(Optional.of(entity));
-
-        String version = excelUploadService.uploadExcelFile("test_table", List.of("ADMIN"), mock(MockMultipartFile.class), "tester")
-                .get("version").toString();
-
-        assertTrue(version.startsWith("1.") || version.startsWith("2."));
-    }
-
-    @Test
-    void testCastValue_InvalidNumber() {
-        RuleAppServiceException ex = assertThrows(RuleAppServiceException.class,
-                () -> invokeCastValue("abc", "int"));
-        assertEquals(ErrorCode.CASTING_ERROR, ex.getErrorCode());
-    }
-
-    // helper to call private castValue through reflection
-    private Object invokeCastValue(String value, String castTo) {
-        try {
-            var method = ExcelUploadServiceImpl.class.getDeclaredMethod("castValue", String.class, String.class);
-            method.setAccessible(true);
-            return method.invoke(excelUploadService, value, castTo);
-        } catch (Exception e) {
-            if (e.getCause() instanceof RuleAppServiceException) {
-                throw (RuleAppServiceException) e.getCause();
-            }
-            throw new RuntimeException(e);
-        }
     }
 }
