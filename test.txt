@@ -320,3 +320,23 @@ void testGetItems_Unauthorized_InvalidJson_CatchFalse() throws Exception {
 }
 
 
+@Test
+void testGetVersions_NonAdmin_OneEntity() {
+    RuleAppTableVersionEntity singleEntity = new RuleAppTableVersionEntity();
+    singleEntity.setTableId("testTable");
+
+    List<RuleAppTableVersionEntity> entities = List.of(singleEntity);
+
+    when(ruleAppTableVersionRepository.findByTableIdOrderByValidityStartDesc("testTable"))
+            .thenReturn(entities);
+    when(ruleAppServiceMapper.mapTableVersionsToResponse(entities))
+            .thenReturn(List.of(new RuleAppTableVersionResponse()));
+
+    // Non-admin but only one version, should return all versions (else branch)
+    List<RuleAppTableVersionResponse> result = ruleappDAO.getVersions("testTable", false);
+
+    assertEquals(1, result.size());
+    verify(ruleAppServiceMapper).mapTableVersionsToResponse(entities);
+}
+
+
