@@ -1,37 +1,38 @@
 package com.bakerhughes.ruleapp.service.impl;
 
-import com.bakerhughes.ruleapp.dto.LookUpTableResponse;
-import com.bakerhughes.ruleapp.dto.RuleAppTableVersionResponse;
+import com.bakerhughes.ruleapp.dto.BulkUploadFormColumn;
 import com.bakerhughes.ruleapp.entity.LookUpTableEntity;
 import com.bakerhughes.ruleapp.entity.RuleAppTableVersionEntity;
 import com.bakerhughes.ruleapp.entity.RuleappHistoricalDataEntity;
 import com.bakerhughes.ruleapp.exception.ErrorCode;
 import com.bakerhughes.ruleapp.exception.RuleAppServiceException;
-import com.bakerhughes.ruleapp.mapper.RuleAppServiceMapper;
 import com.bakerhughes.ruleapp.repository.LookUpTableRepository;
 import com.bakerhughes.ruleapp.repository.RuleAppTableVersionRepository;
 import com.bakerhughes.ruleapp.repository.RuleappHistoricalDataRepository;
-import com.fasterxml.jackson.core.type.TypeReference;
+import com.bakerhughes.ruleapp.service.DynamicTableService;
 import com.fasterxml.jackson.databind.ObjectMapper;
-
-import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Test;
+import org.apache.poi.ss.usermodel.*;
+import org.apache.poi.xssf.usermodel.XSSFWorkbook;
+import org.junit.jupiter.api.*;
 import org.junit.jupiter.api.extension.ExtendWith;
-import org.mockito.InjectMocks;
-import org.mockito.Mock;
+import org.mockito.*;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.http.HttpStatus;
+import org.springframework.mock.web.MockMultipartFile;
 
+import java.io.ByteArrayOutputStream;
+import java.time.LocalDateTime;
 import java.util.*;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
 
 @ExtendWith(MockitoExtension.class)
-class RuleappDAOImplTest {
+class ExcelUploadServiceImplTest {
 
     @InjectMocks
-    private RuleappDAOImpl ruleappDAO;
+    private ExcelUploadServiceImpl excelUploadService;
 
     @Mock
     private LookUpTableRepository lookUpTableRepository;
@@ -43,300 +44,158 @@ class RuleappDAOImplTest {
     private RuleappHistoricalDataRepository ruleappHistoricalDataRepository;
 
     @Mock
-    private RuleAppServiceMapper ruleAppServiceMapper;
+    private DynamicTableService dynamicTableService;
 
-    @Mock
-    private ObjectMapper objectMapper;
+    @Spy
+    private ObjectMapper objectMapper = new ObjectMapper();
 
     private LookUpTableEntity tableEntity;
-    private RuleAppTableVersionEntity versionEntity;
-    private RuleappHistoricalDataEntity historicalDataEntity;
 
     @BeforeEach
     void setUp() {
         tableEntity = new LookUpTableEntity();
-        tableEntity.setTableName("testTable");
-        tableEntity.setDownloadableByGroups("[\"group1\",\"group2\"]");
-
-        versionEntity = new RuleAppTableVersionEntity();
-        versionEntity.setTableId("testTable");
-
-        historicalDataEntity = new RuleappHistoricalDataEntity();
-        historicalDataEntity.setTableId("testTable");
-        historicalDataEntity.setVersion("v1");
-        historicalDataEntity.setRecord("[{\"key\":\"value\"}]");
+        tableEntity.setTableName("test_table");
+        tableEntity.setUploadableByGroups("[\"ADMIN\",\"USER\"]");
+        tableEntity.setKeyColumns("ID");
+        tableEntity.setBulkUploadForm("[{\"excelColumnName\":\"ID\",\"columnName\":\"id\",\"castTo\":\"int\"}]");
     }
 
-    // =========================
-    // getTablesByGroups Tests
-    // =========================
+    private MockMultipartFile createExcelFile() throws Exception {
+        Workbook workbook = new XSSFWorkbook();
+        Sheet sheet = workbook.createSheet();
+        Row header = sheet.createRow(0);
+        header.createCell(0).setCellValue("ID");
 
-    @Test
-    void testGetTablesByGroups_Success() {
-        List<LookUpTableEntity> entities = List.of(tableEntity);
-        List<LookUpTableResponse> responseList = List.of(new LookUpTableResponse());
+        Row row = sheet.createRow(1);
+        row.createCell(0).setCellValue(123);
 
-        when(lookUpTableRepository.findByGroups(anyList())).thenReturn(entities);
-        when(ruleAppServiceMapper.mapTableInformationsToResponse(entities)).thenReturn(responseList);
-
-        List<LookUpTableResponse> result = ruleappDAO.getTablesByGroups(List.of("group1"));
-
-        assertEquals(1, result.size());
-        verify(lookUpTableRepository, times(1)).findByGroups(anyList());
+        ByteArrayOutputStream bos = new ByteArrayOutputStream();
+        workbook.write(bos);
+        workbook.close();
+        return new MockMultipartFile("file", "test.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", bos.toByteArray());
     }
 
     @Test
-    void testGetTablesByGroups_NotFound() {
-        when(lookUpTableRepository.findByGroups(anyList())).thenReturn(Collections.emptyList());
+    void testUploadExcelFile_Success() throws Exception {
+        MockMultipartFile file = createExcelFile();
+
+        when(lookUpTableRepository.findByTableName("test_table"))
+                .thenReturn(Optional.of(tableEntity));
+        when(ruleAppTableVersionRepository.findFirstByTableIdAndValidityEndIsNullOrderByValidityStartDesc(any()))
+                .thenReturn(Optional.empty());
+
+        Map<String, Object> result = excelUploadService.uploadExcelFile("test_table",
+                List.of("ADMIN"), file, "tester");
+
+        assertEquals("Excel file processed successfully", result.get("message"));
+        assertEquals(1, result.get("totalRows"));
+        assertTrue(result.get("version").toString().contains("."));
+        
+        // verify historical and dynamic table are called
+        verify(dynamicTableService, times(1))
+                .truncateAndReloadTable(anyString(), anyList(), anyList(), anyString());
+        verify(ruleappHistoricalDataRepository, times(1))
+                .save(any(RuleappHistoricalDataEntity.class));
+    }
+
+    @Test
+    void testUploadExcelFile_TableNotFound() {
+        when(lookUpTableRepository.findByTableName("test_table")).thenReturn(Optional.empty());
+        MockMultipartFile file = new MockMultipartFile("file", new byte[0]);
 
         RuleAppServiceException ex = assertThrows(RuleAppServiceException.class,
-                () -> ruleappDAO.getTablesByGroups(List.of("group1")));
-
-        assertEquals(ErrorCode.TABLES_NOT_FOUND, ex.getErrorCode());
-        assertEquals(HttpStatus.NOT_FOUND, ex.getStatus());
-    }
-
-    // =========================
-    // getVersions Tests
-    // =========================
-
-    @Test
-    void testGetVersions_Admin_Success() {
-        List<RuleAppTableVersionEntity> entities = List.of(versionEntity);
-        when(ruleAppTableVersionRepository.findByTableIdOrderByValidityStartDesc("testTable"))
-                .thenReturn(entities);
-        when(ruleAppServiceMapper.mapTableVersionsToResponse(entities))
-                .thenReturn(List.of(new RuleAppTableVersionResponse()));
-
-        List<RuleAppTableVersionResponse> result = ruleappDAO.getVersions("testTable", true);
-
-        assertEquals(1, result.size());
-    }
-
-    @Test
-    void testGetVersions_NonAdmin_ReturnsLatestOnly() {
-        RuleAppTableVersionEntity v1 = new RuleAppTableVersionEntity();
-        RuleAppTableVersionEntity v2 = new RuleAppTableVersionEntity();
-        List<RuleAppTableVersionEntity> entities = List.of(v1, v2);
-
-        when(ruleAppTableVersionRepository.findByTableIdOrderByValidityStartDesc("testTable"))
-                .thenReturn(entities);
-        when(ruleAppServiceMapper.mapTableVersionsToResponse(anyList()))
-                .thenReturn(List.of(new RuleAppTableVersionResponse()));
-
-        List<RuleAppTableVersionResponse> result = ruleappDAO.getVersions("testTable", false);
-
-        assertEquals(1, result.size());
-        verify(ruleAppServiceMapper).mapTableVersionsToResponse(eq(List.of(v1)));
-    }
-
-    @Test
-    void testGetVersions_NotFound() {
-        when(ruleAppTableVersionRepository.findByTableIdOrderByValidityStartDesc("testTable"))
-                .thenReturn(Collections.emptyList());
-
-        RuleAppServiceException ex = assertThrows(RuleAppServiceException.class,
-                () -> ruleappDAO.getVersions("testTable", true));
+                () -> excelUploadService.uploadExcelFile("test_table", List.of("ADMIN"), file, "tester"));
 
         assertEquals(ErrorCode.TABLE_NOT_FOUND, ex.getErrorCode());
-        assertEquals(HttpStatus.NOT_FOUND, ex.getStatus());
-    }
-
-    // =========================
-    // getItems Tests
-    // =========================
-
-    @Test
-    void testGetItems_Success() throws Exception {
-        // Table found
-        when(lookUpTableRepository.findByTableName("testTable"))
-                .thenReturn(Optional.of(tableEntity));
-
-        // Valid downloadable groups JSON
-        when(objectMapper.readValue(eq("[\"group1\",\"group2\"]"), any(TypeReference.class)))
-                .thenReturn(List.of("group1", "group2"));
-
-        // Historical data found
-        when(ruleappHistoricalDataRepository.findByTableIdAndVersion("testTable", "v1"))
-                .thenReturn(historicalDataEntity);
-
-        List<Map<String, Object>> result = ruleappDAO.getItems("testTable", "v1", List.of("group1"));
-
-        assertEquals(1, result.size());
-        assertEquals("value", result.get(0).get("key"));
+        assertEquals(HttpStatus.NOT_FOUND, ex.getHttpStatus());
     }
 
     @Test
-    void testGetItems_TableNotFound() {
-        when(lookUpTableRepository.findByTableName("testTable")).thenReturn(Optional.empty());
+    void testUploadExcelFile_Unauthorized() throws Exception {
+        tableEntity.setUploadableByGroups("[\"ADMIN\"]");
+        when(lookUpTableRepository.findByTableName("test_table")).thenReturn(Optional.of(tableEntity));
+
+        MockMultipartFile file = createExcelFile();
 
         RuleAppServiceException ex = assertThrows(RuleAppServiceException.class,
-                () -> ruleappDAO.getItems("testTable", "v1", List.of("group1")));
+                () -> excelUploadService.uploadExcelFile("test_table", List.of("GUEST"), file, "tester"));
 
-        assertEquals(ErrorCode.TABLE_NOT_FOUND, ex.getErrorCode());
+        assertEquals(ErrorCode.UNAUTHORIZED_UPLOAD_ACCESS, ex.getErrorCode());
+        assertEquals(HttpStatus.UNAUTHORIZED, ex.getHttpStatus());
     }
 
     @Test
-    void testGetItems_UnauthorizedAccess_NoMatchingGroup() throws Exception {
-        when(lookUpTableRepository.findByTableName("testTable"))
-                .thenReturn(Optional.of(tableEntity));
+    void testUploadExcelFile_MissingColumn() throws Exception {
+        tableEntity.setBulkUploadForm("[{\"excelColumnName\":\"Name\",\"columnName\":\"name\",\"castTo\":\"string\"}]");
+        when(lookUpTableRepository.findByTableName("test_table")).thenReturn(Optional.of(tableEntity));
 
-        // Valid JSON, but user group doesn't match
-        when(objectMapper.readValue(eq("[\"group1\",\"group2\"]"), any(TypeReference.class)))
-                .thenReturn(List.of("group2"));
+        MockMultipartFile file = createExcelFile();
 
         RuleAppServiceException ex = assertThrows(RuleAppServiceException.class,
-                () -> ruleappDAO.getItems("testTable", "v1", List.of("unauthorized")));
+                () -> excelUploadService.uploadExcelFile("test_table", List.of("ADMIN"), file, "tester"));
 
-        assertEquals(ErrorCode.UNAUTHORIZED_DOWNLOAD_ACCESS, ex.getErrorCode());
-        assertEquals(HttpStatus.UNAUTHORIZED, ex.getStatus());
+        assertEquals(ErrorCode.MISSING_REQUIRED_COLUMNS, ex.getErrorCode());
     }
 
     @Test
-    void testGetItems_UnauthorizedAccess_InvalidJson() throws Exception {
-        when(lookUpTableRepository.findByTableName("testTable"))
-                .thenReturn(Optional.of(tableEntity));
+    void testUploadExcelFile_DuplicateKeys() throws Exception {
+        MockMultipartFile file = createExcelFile();
 
-        // JSON parsing fails
-        when(objectMapper.readValue(anyString(), any(TypeReference.class)))
-                .thenThrow(new RuntimeException("JSON error"));
+        // Add duplicate row to cause duplicate key error
+        Workbook workbook = new XSSFWorkbook(file.getInputStream());
+        Sheet sheet = workbook.getSheetAt(0);
+        Row row = sheet.createRow(2);
+        row.createCell(0).setCellValue(123);
+
+        ByteArrayOutputStream bos = new ByteArrayOutputStream();
+        workbook.write(bos);
+        workbook.close();
+
+        MockMultipartFile duplicateFile = new MockMultipartFile("file", "duplicate.xlsx",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", bos.toByteArray());
+
+        when(lookUpTableRepository.findByTableName("test_table")).thenReturn(Optional.of(tableEntity));
 
         RuleAppServiceException ex = assertThrows(RuleAppServiceException.class,
-                () -> ruleappDAO.getItems("testTable", "v1", List.of("group1")));
+                () -> excelUploadService.uploadExcelFile("test_table", List.of("ADMIN"), duplicateFile, "tester"));
 
-        assertEquals(ErrorCode.UNAUTHORIZED_DOWNLOAD_ACCESS, ex.getErrorCode());
+        assertEquals(ErrorCode.DUPLICATE_KEY_FOUND, ex.getErrorCode());
     }
 
     @Test
-    void testGetItems_VersionNotFound() throws Exception {
-        when(lookUpTableRepository.findByTableName("testTable"))
-                .thenReturn(Optional.of(tableEntity));
+    void testUpdateTableVersion_ExistingVersion() {
+        RuleAppTableVersionEntity entity = new RuleAppTableVersionEntity();
+        entity.setVersion(1);
+        entity.setSubVersion(0);
+        entity.setCreatedDate(LocalDateTime.now());
 
-        when(objectMapper.readValue(eq("[\"group1\",\"group2\"]"), any(TypeReference.class)))
-                .thenReturn(List.of("group1"));
+        when(ruleAppTableVersionRepository.findFirstByTableIdAndValidityEndIsNullOrderByValidityStartDesc("test_table"))
+                .thenReturn(Optional.of(entity));
 
-        // Version missing
-        when(ruleappHistoricalDataRepository.findByTableIdAndVersion("testTable", "v1"))
-                .thenReturn(null);
+        String version = excelUploadService.uploadExcelFile("test_table", List.of("ADMIN"), mock(MockMultipartFile.class), "tester")
+                .get("version").toString();
 
-        RuleAppServiceException ex = assertThrows(RuleAppServiceException.class,
-                () -> ruleappDAO.getItems("testTable", "v1", List.of("group1")));
-
-        assertEquals(ErrorCode.VERSIONS_NOT_FOUND, ex.getErrorCode());
+        assertTrue(version.startsWith("1.") || version.startsWith("2."));
     }
 
     @Test
-    void testGetItems_NullDownloadableGroups() throws Exception {
-        // Covers `downloadableByGroups == null` branch
-        tableEntity.setDownloadableByGroups(null);
-
-        when(lookUpTableRepository.findByTableName("testTable"))
-                .thenReturn(Optional.of(tableEntity));
-
+    void testCastValue_InvalidNumber() {
         RuleAppServiceException ex = assertThrows(RuleAppServiceException.class,
-                () -> ruleappDAO.getItems("testTable", "v1", List.of("group1")));
-
-        assertEquals(ErrorCode.UNAUTHORIZED_DOWNLOAD_ACCESS, ex.getErrorCode());
+                () -> invokeCastValue("abc", "int"));
+        assertEquals(ErrorCode.CASTING_ERROR, ex.getErrorCode());
     }
 
-    @Test
-    void testGetItems_NullUserGroups() throws Exception {
-        // Covers `userGroups == null` branch
-        when(lookUpTableRepository.findByTableName("testTable"))
-                .thenReturn(Optional.of(tableEntity));
-
-        RuleAppServiceException ex = assertThrows(RuleAppServiceException.class,
-                () -> ruleappDAO.getItems("testTable", "v1", null));
-
-        assertEquals(ErrorCode.UNAUTHORIZED_DOWNLOAD_ACCESS, ex.getErrorCode());
+    // helper to call private castValue through reflection
+    private Object invokeCastValue(String value, String castTo) {
+        try {
+            var method = ExcelUploadServiceImpl.class.getDeclaredMethod("castValue", String.class, String.class);
+            method.setAccessible(true);
+            return method.invoke(excelUploadService, value, castTo);
+        } catch (Exception e) {
+            if (e.getCause() instanceof RuleAppServiceException) {
+                throw (RuleAppServiceException) e.getCause();
+            }
+            throw new RuntimeException(e);
+        }
     }
 }
-
-
-// 1) Left side of (A || B) true: downloadableByGroups == null (short-circuits)
-@Test
-void testGetItems_Unauthorized_LeftOperandTrue_DownloadableGroupsNull() throws Exception {
-    LookUpTableEntity t = new LookUpTableEntity();
-    t.setTableName("testTable");
-    t.setDownloadableByGroups(null); // triggers A == true
-
-    when(lookUpTableRepository.findByTableName("testTable")).thenReturn(Optional.of(t));
-
-    RuleAppServiceException ex = assertThrows(RuleAppServiceException.class,
-            () -> ruleappDAO.getItems("testTable", "v1", List.of("group1")));
-
-    assertEquals(ErrorCode.UNAUTHORIZED_DOWNLOAD_ACCESS, ex.getErrorCode());
-}
-
-// 2) Left false, right true: userGroups == null (forces evaluation of right operand)
-@Test
-void testGetItems_Unauthorized_RightOperandTrue_UserGroupsNull() throws Exception {
-    LookUpTableEntity t = new LookUpTableEntity();
-    t.setTableName("testTable");
-    t.setDownloadableByGroups("[\"group1\"]"); // left operand false
-
-    when(lookUpTableRepository.findByTableName("testTable")).thenReturn(Optional.of(t));
-
-    // userGroups is null -> right operand true
-    RuleAppServiceException ex = assertThrows(RuleAppServiceException.class,
-            () -> ruleappDAO.getItems("testTable", "v1", null));
-
-    assertEquals(ErrorCode.UNAUTHORIZED_DOWNLOAD_ACCESS, ex.getErrorCode());
-}
-
-// 3) Both operands false -> try-block runs, but anyMatch() == false (no overlap)
-@Test
-void testGetItems_Unauthorized_NoMatchingGroup_AnyMatchFalse() throws Exception {
-    LookUpTableEntity t = new LookUpTableEntity();
-    t.setTableName("testTable");
-    t.setDownloadableByGroups("[\"group1\",\"group2\"]");
-
-    when(lookUpTableRepository.findByTableName("testTable")).thenReturn(Optional.of(t));
-    when(objectMapper.readValue(eq("[\"group1\",\"group2\"]"), any(TypeReference.class)))
-            .thenReturn(List.of("group1", "group2")); // allowed groups present
-
-    // Provide user group with no overlap -> anyMatch -> false
-    RuleAppServiceException ex = assertThrows(RuleAppServiceException.class,
-            () -> ruleappDAO.getItems("testTable", "v1", List.of("other")));
-
-    assertEquals(ErrorCode.UNAUTHORIZED_DOWNLOAD_ACCESS, ex.getErrorCode());
-}
-
-// 4) Exception path in try -> catch returns false
-@Test
-void testGetItems_Unauthorized_InvalidJson_CatchFalse() throws Exception {
-    LookUpTableEntity t = new LookUpTableEntity();
-    t.setTableName("testTable");
-    t.setDownloadableByGroups("[\"group1\"]");
-
-    when(lookUpTableRepository.findByTableName("testTable")).thenReturn(Optional.of(t));
-    when(objectMapper.readValue(anyString(), any(TypeReference.class)))
-            .thenThrow(new RuntimeException("bad json"));
-
-    RuleAppServiceException ex = assertThrows(RuleAppServiceException.class,
-            () -> ruleappDAO.getItems("testTable", "v1", List.of("group1")));
-
-    assertEquals(ErrorCode.UNAUTHORIZED_DOWNLOAD_ACCESS, ex.getErrorCode());
-}
-
-
-@Test
-void testGetVersions_NonAdmin_OneEntity() {
-    RuleAppTableVersionEntity singleEntity = new RuleAppTableVersionEntity();
-    singleEntity.setTableId("testTable");
-
-    List<RuleAppTableVersionEntity> entities = List.of(singleEntity);
-
-    when(ruleAppTableVersionRepository.findByTableIdOrderByValidityStartDesc("testTable"))
-            .thenReturn(entities);
-    when(ruleAppServiceMapper.mapTableVersionsToResponse(entities))
-            .thenReturn(List.of(new RuleAppTableVersionResponse()));
-
-    // Non-admin but only one version, should return all versions (else branch)
-    List<RuleAppTableVersionResponse> result = ruleappDAO.getVersions("testTable", false);
-
-    assertEquals(1, result.size());
-    verify(ruleAppServiceMapper).mapTableVersionsToResponse(entities);
-}
-
-
