@@ -1,208 +1,131 @@
 package com.bakerhughes.ruleapp.service.impl;
 
 import com.bakerhughes.ruleapp.dto.BulkUploadFormColumn;
-import com.bakerhughes.ruleapp.entity.LookUpTableEntity;
-import com.bakerhughes.ruleapp.entity.RuleAppTableVersionEntity;
-import com.bakerhughes.ruleapp.entity.RuleappHistoricalDataEntity;
 import com.bakerhughes.ruleapp.exception.ErrorCode;
 import com.bakerhughes.ruleapp.exception.RuleAppServiceException;
-import com.bakerhughes.ruleapp.repository.LookUpTableRepository;
-import com.bakerhughes.ruleapp.repository.RuleAppTableVersionRepository;
-import com.bakerhughes.ruleapp.repository.RuleappHistoricalDataRepository;
-import com.bakerhughes.ruleapp.service.DynamicTableService;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import org.apache.poi.ss.usermodel.*;
-import org.apache.poi.xssf.usermodel.XSSFWorkbook;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.mockito.*;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.InjectMocks;
+import org.mockito.Mock;
+import org.mockito.Mockito;
+import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.http.HttpStatus;
-import org.springframework.mock.web.MockMultipartFile;
-import org.springframework.web.multipart.MultipartFile;
+import org.springframework.jdbc.core.JdbcTemplate;
 
-import java.io.ByteArrayInputStream;
-import java.io.ByteArrayOutputStream;
 import java.util.*;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
 
-class ExcelUploadServiceImplTest {
+@ExtendWith(MockitoExtension.class)
+class DynamicTableServiceImplTest {
+
+    @Mock
+    private JdbcTemplate jdbcTemplate;
 
     @InjectMocks
-    private ExcelUploadServiceImpl excelUploadService;
+    private DynamicTableServiceImpl service;
 
-    @Mock
-    private LookUpTableRepository lookUpTableRepository;
-    @Mock
-    private RuleAppTableVersionRepository ruleAppTableVersionRepository;
-    @Mock
-    private RuleappHistoricalDataRepository ruleappHistoricalDataRepository;
-    @Mock
-    private DynamicTableService dynamicTableService;
-    @Mock
-    private ObjectMapper objectMapper;
-
-    private LookUpTableEntity mockTableEntity;
-    private MultipartFile validFile;
+    private List<BulkUploadFormColumn> bulkUploadFormColumns;
 
     @BeforeEach
-    void setUp() throws Exception {
-        MockitoAnnotations.openMocks(this);
-
-        // Create a valid Excel file with headers and data
-        Workbook workbook = new XSSFWorkbook();
-        Sheet sheet = workbook.createSheet();
-        Row header = sheet.createRow(0);
-        header.createCell(0).setCellValue("Name");
-        header.createCell(1).setCellValue("Age");
-
-        Row row = sheet.createRow(1);
-        row.createCell(0).setCellValue("John");
-        row.createCell(1).setCellValue("30");
-
-        ByteArrayOutputStream bos = new ByteArrayOutputStream();
-        workbook.write(bos);
-
-        validFile = new MockMultipartFile("file", "test.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", bos.toByteArray());
-
-        workbook.close();
-
-        // Mock Table entity
-        mockTableEntity = new LookUpTableEntity();
-        mockTableEntity.setTableName("test_table");
-        mockTableEntity.setUploadableByGroups("[\"admin\",\"user\"]");
-        mockTableEntity.setKeyColumns("Name");
-        mockTableEntity.setBulkUploadForm("[{\"excelColumnName\":\"Name\",\"columnName\":\"name\",\"castTo\":\"String\"}," +
-                "{\"excelColumnName\":\"Age\",\"columnName\":\"age\",\"castTo\":\"Integer\"}]");
+    void setUp() {
+        BulkUploadFormColumn col1 = new BulkUploadFormColumn();
+        col1.setColumnName("ID");
+        BulkUploadFormColumn col2 = new BulkUploadFormColumn();
+        col2.setColumnName("NAME");
+        bulkUploadFormColumns = List.of(col1, col2);
     }
 
     @Test
-    void testUploadExcelFile_Success() throws Exception {
-        List<String> userGroups = List.of("admin");
+    void testTruncateAndReloadTable_success() {
+        // Mock required columns from DB
+        when(jdbcTemplate.queryForList(anyString(), eq(String.class), anyString()))
+                .thenReturn(List.of("AGE"));
 
-        when(lookUpTableRepository.findByTableName("test_table")).thenReturn(Optional.of(mockTableEntity));
-        when(objectMapper.readValue(eq("[\"admin\",\"user\"]"), any(TypeReference.class)))
-                .thenReturn(List.of("admin", "user"));
-        when(objectMapper.readValue(eq(mockTableEntity.getBulkUploadForm()), any(TypeReference.class)))
-                .thenReturn(List.of(
-                        new BulkUploadFormColumn("Name", "name", "String", null),
-                        new BulkUploadFormColumn("Age", "age", "Integer", null)
-                ));
+        // Prepare input data
+        Map<String, Object> row1 = new HashMap<>();
+        row1.put("id", 1);
+        row1.put("name", "John");
+        row1.put("age", 30);
 
-        when(ruleAppTableVersionRepository.save(any())).thenReturn(new RuleAppTableVersionEntity());
+        Map<String, Object> row2 = new HashMap<>();
+        row2.put("id", 2);
+        row2.put("name", "Jane");
+        row2.put("age", 25);
 
-        Map<String, Object> result = excelUploadService.uploadExcelFile("test_table", userGroups, validFile, "tester");
+        List<Map<String, Object>> data = List.of(row1, row2);
 
-        assertEquals("Excel file processed successfully", result.get("message"));
-        assertEquals(1, result.get("totalRows"));
-        assertTrue(result.containsKey("version"));
+        // Mock truncate and batch update
+        doNothing().when(jdbcTemplate).execute(anyString());
+        when(jdbcTemplate.batchUpdate(anyString(), anyList())).thenReturn(new int[]{1, 1});
 
-        verify(dynamicTableService, times(1))
-                .truncateAndReloadTable(eq("test_table"), anyList(), anyList(), eq("tester"));
-        verify(ruleappHistoricalDataRepository, times(1)).saveAll(anyList());
+        // Call method
+        service.truncateAndReloadTable("PersonTable", data, bulkUploadFormColumns);
+
+        // Verify
+        verify(jdbcTemplate, times(1)).execute("TRUNCATE TABLE PersonTable");
+        verify(jdbcTemplate, times(1)).batchUpdate(contains("INSERT INTO PersonTable"), anyList());
     }
 
     @Test
-    void testUploadExcelFile_TableNotFound() {
-        when(lookUpTableRepository.findByTableName("invalid")).thenReturn(Optional.empty());
+    void testTruncateAndReloadTable_exceptionThrown() {
+        // Mock required columns
+        when(jdbcTemplate.queryForList(anyString(), eq(String.class), anyString()))
+                .thenReturn(List.of("AGE"));
+
+        // Mock truncate call to throw exception
+        doThrow(new RuntimeException("DB error")).when(jdbcTemplate).execute(anyString());
+
+        List<Map<String, Object>> data = List.of(Map.of("id", 1, "name", "John", "age", 30));
 
         RuleAppServiceException ex = assertThrows(RuleAppServiceException.class, () ->
-                excelUploadService.uploadExcelFile("invalid", List.of("admin"), validFile, "tester"));
+                service.truncateAndReloadTable("PersonTable", data, bulkUploadFormColumns)
+        );
 
-        assertEquals(ErrorCode.TABLE_NOT_FOUND, ex.getErrorCode());
+        assertEquals(ErrorCode.TABLE_RELOAD_FAILURE, ex.getErrorCode());
+        assertEquals(HttpStatus.INTERNAL_SERVER_ERROR, ex.getHttpStatus());
     }
 
     @Test
-    void testUploadExcelFile_UnauthorizedUser() throws Exception {
-        when(lookUpTableRepository.findByTableName("test_table")).thenReturn(Optional.of(mockTableEntity));
-        when(objectMapper.readValue(eq("[\"admin\",\"user\"]"), any(TypeReference.class)))
-                .thenReturn(List.of("admin", "user"));
-
-        RuleAppServiceException ex = assertThrows(RuleAppServiceException.class, () ->
-                excelUploadService.uploadExcelFile("test_table", List.of("guest"), validFile, "tester"));
-
-        assertEquals(ErrorCode.UNAUTHORIZED_UPLOAD_ACCESS, ex.getErrorCode());
+    void testGetRequiredColumns_invalidTableName() {
+        List<String> result = invokeGetRequiredColumns("123Invalid");
+        assertTrue(result.isEmpty());
+        verify(jdbcTemplate, never()).queryForList(anyString(), eq(String.class), anyString());
     }
 
     @Test
-    void testUploadExcelFile_InvalidBulkUploadForm() throws Exception {
-        mockTableEntity.setBulkUploadForm(""); // invalid JSON
+    void testGetRequiredColumns_dbError() {
+        when(jdbcTemplate.queryForList(anyString(), eq(String.class), anyString()))
+                .thenThrow(new RuntimeException("DB error"));
 
-        when(lookUpTableRepository.findByTableName("test_table")).thenReturn(Optional.of(mockTableEntity));
-        when(objectMapper.readValue(eq("[\"admin\",\"user\"]"), any(TypeReference.class)))
-                .thenReturn(List.of("admin"));
-
-        RuleAppServiceException ex = assertThrows(RuleAppServiceException.class, () ->
-                excelUploadService.uploadExcelFile("test_table", List.of("admin"), validFile, "tester"));
-
-        assertEquals(ErrorCode.BULK_FORM_EMPTY, ex.getErrorCode());
+        List<String> result = invokeGetRequiredColumns("ValidTable");
+        assertTrue(result.isEmpty());
+        verify(jdbcTemplate, times(1))
+                .queryForList(anyString(), eq(String.class), eq("ValidTable"));
     }
 
     @Test
-    void testUploadExcelFile_MissingRequiredColumns() throws Exception {
-        // Excel with wrong header
-        Workbook workbook = new XSSFWorkbook();
-        Sheet sheet = workbook.createSheet();
-        Row header = sheet.createRow(0);
-        header.createCell(0).setCellValue("WrongHeader");
+    void testGetRequiredColumns_success() {
+        when(jdbcTemplate.queryForList(anyString(), eq(String.class), anyString()))
+                .thenReturn(List.of("ID", "AGE"));
 
-        ByteArrayOutputStream bos = new ByteArrayOutputStream();
-        workbook.write(bos);
-
-        MultipartFile invalidFile = new MockMultipartFile("file", "wrong.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", bos.toByteArray());
-        workbook.close();
-
-        when(lookUpTableRepository.findByTableName("test_table")).thenReturn(Optional.of(mockTableEntity));
-        when(objectMapper.readValue(eq("[\"admin\",\"user\"]"), any(TypeReference.class)))
-                .thenReturn(List.of("admin"));
-        when(objectMapper.readValue(eq(mockTableEntity.getBulkUploadForm()), any(TypeReference.class)))
-                .thenReturn(List.of(
-                        new BulkUploadFormColumn("Name", "name", "String", null),
-                        new BulkUploadFormColumn("Age", "age", "Integer", null)
-                ));
-
-        RuleAppServiceException ex = assertThrows(RuleAppServiceException.class, () ->
-                excelUploadService.uploadExcelFile("test_table", List.of("admin"), invalidFile, "tester"));
-
-        assertEquals(ErrorCode.MISSING_REQUIRED_COLUMNS, ex.getErrorCode());
+        List<String> result = invokeGetRequiredColumns("ValidTable");
+        assertEquals(List.of("ID", "AGE"), result);
     }
 
-    @Test
-    void testUploadExcelFile_DuplicateKeyFound() throws Exception {
-        // Create Excel with duplicate Name
-        Workbook workbook = new XSSFWorkbook();
-        Sheet sheet = workbook.createSheet();
-        Row header = sheet.createRow(0);
-        header.createCell(0).setCellValue("Name");
-        header.createCell(1).setCellValue("Age");
-
-        Row row1 = sheet.createRow(1);
-        row1.createCell(0).setCellValue("John");
-        row1.createCell(1).setCellValue("30");
-
-        Row row2 = sheet.createRow(2);
-        row2.createCell(0).setCellValue("John"); // duplicate key
-        row2.createCell(1).setCellValue("40");
-
-        ByteArrayOutputStream bos = new ByteArrayOutputStream();
-        workbook.write(bos);
-        workbook.close();
-
-        MultipartFile duplicateFile = new MockMultipartFile("file", "dup.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", bos.toByteArray());
-
-        when(lookUpTableRepository.findByTableName("test_table")).thenReturn(Optional.of(mockTableEntity));
-        when(objectMapper.readValue(eq("[\"admin\",\"user\"]"), any(TypeReference.class)))
-                .thenReturn(List.of("admin"));
-        when(objectMapper.readValue(eq(mockTableEntity.getBulkUploadForm()), any(TypeReference.class)))
-                .thenReturn(List.of(
-                        new BulkUploadFormColumn("Name", "name", "String", null),
-                        new BulkUploadFormColumn("Age", "age", "Integer", null)
-                ));
-
-        RuleAppServiceException ex = assertThrows(RuleAppServiceException.class, () ->
-                excelUploadService.uploadExcelFile("test_table", List.of("admin"), duplicateFile, "tester"));
-
-        assertEquals(ErrorCode.DUPLICATE_KEY_FOUND, ex.getErrorCode());
+    /**
+     * Helper to call private getRequiredColumns via public method indirectly.
+     */
+    private List<String> invokeGetRequiredColumns(String tableName) {
+        // Call public method with empty data so it indirectly calls getRequiredColumns
+        try {
+            service.truncateAndReloadTable(tableName, new ArrayList<>(), bulkUploadFormColumns);
+        } catch (RuleAppServiceException ignored) {
+            // ignore exception, we only care about getRequiredColumns invocation
+        }
+        return service.getRequiredColumns(tableName);
     }
 }
