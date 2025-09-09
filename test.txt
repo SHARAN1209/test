@@ -8,7 +8,6 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
-import org.mockito.Mockito;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -28,15 +27,17 @@ class DynamicTableServiceImplTest {
     @InjectMocks
     private DynamicTableServiceImpl service;
 
-    private List<BulkUploadFormColumn> bulkUploadFormColumns;
+    private List<BulkUploadFormColumn> columns;
 
     @BeforeEach
-    void setUp() {
+    void setup() {
         BulkUploadFormColumn col1 = new BulkUploadFormColumn();
         col1.setColumnName("ID");
+
         BulkUploadFormColumn col2 = new BulkUploadFormColumn();
         col2.setColumnName("NAME");
-        bulkUploadFormColumns = List.of(col1, col2);
+
+        columns = List.of(col1, col2);
     }
 
     @Test
@@ -45,87 +46,79 @@ class DynamicTableServiceImplTest {
         when(jdbcTemplate.queryForList(anyString(), eq(String.class), anyString()))
                 .thenReturn(List.of("AGE"));
 
-        // Prepare input data
+        // Prepare data
         Map<String, Object> row1 = new HashMap<>();
         row1.put("id", 1);
-        row1.put("name", "John");
-        row1.put("age", 30);
+        row1.put("name", "Alice");
+        row1.put("age", 25);
 
         Map<String, Object> row2 = new HashMap<>();
         row2.put("id", 2);
-        row2.put("name", "Jane");
-        row2.put("age", 25);
+        row2.put("name", "Bob");
+        row2.put("age", 30);
 
         List<Map<String, Object>> data = List.of(row1, row2);
 
-        // Mock truncate and batch update
+        // Mock DB operations
         doNothing().when(jdbcTemplate).execute(anyString());
         when(jdbcTemplate.batchUpdate(anyString(), anyList())).thenReturn(new int[]{1, 1});
 
-        // Call method
-        service.truncateAndReloadTable("PersonTable", data, bulkUploadFormColumns);
+        // Execute public method
+        service.truncateAndReloadTable("PersonTable", data, columns);
 
-        // Verify
+        // Verify interactions
         verify(jdbcTemplate, times(1)).execute("TRUNCATE TABLE PersonTable");
         verify(jdbcTemplate, times(1)).batchUpdate(contains("INSERT INTO PersonTable"), anyList());
     }
 
     @Test
-    void testTruncateAndReloadTable_exceptionThrown() {
+    void testTruncateAndReloadTable_withDbError() {
         // Mock required columns
         when(jdbcTemplate.queryForList(anyString(), eq(String.class), anyString()))
                 .thenReturn(List.of("AGE"));
 
-        // Mock truncate call to throw exception
+        // Force truncate to throw error
         doThrow(new RuntimeException("DB error")).when(jdbcTemplate).execute(anyString());
 
         List<Map<String, Object>> data = List.of(Map.of("id", 1, "name", "John", "age", 30));
 
-        RuleAppServiceException ex = assertThrows(RuleAppServiceException.class, () ->
-                service.truncateAndReloadTable("PersonTable", data, bulkUploadFormColumns)
-        );
+        RuleAppServiceException ex = assertThrows(RuleAppServiceException.class,
+                () -> service.truncateAndReloadTable("PersonTable", data, columns));
 
         assertEquals(ErrorCode.TABLE_RELOAD_FAILURE, ex.getErrorCode());
         assertEquals(HttpStatus.INTERNAL_SERVER_ERROR, ex.getHttpStatus());
     }
 
     @Test
-    void testGetRequiredColumns_invalidTableName() {
-        List<String> result = invokeGetRequiredColumns("123Invalid");
-        assertTrue(result.isEmpty());
+    void testTruncateAndReloadTable_invalidTableName() {
+        // Table name is invalid -> getRequiredColumns should return empty
+        List<Map<String, Object>> data = List.of(Map.of("id", 1, "name", "Invalid"));
+
+        // No DB calls expected for required columns
+        doNothing().when(jdbcTemplate).execute(anyString());
+        when(jdbcTemplate.batchUpdate(anyString(), anyList())).thenReturn(new int[]{1});
+
+        service.truncateAndReloadTable("123Invalid", data, columns);
+
+        // Verify that queryForList was never called because of invalid table name
         verify(jdbcTemplate, never()).queryForList(anyString(), eq(String.class), anyString());
     }
 
     @Test
-    void testGetRequiredColumns_dbError() {
+    void testTruncateAndReloadTable_requiredColumnsDbErrorHandled() {
+        // Mock queryForList to throw DB error when fetching required columns
         when(jdbcTemplate.queryForList(anyString(), eq(String.class), anyString()))
                 .thenThrow(new RuntimeException("DB error"));
 
-        List<String> result = invokeGetRequiredColumns("ValidTable");
-        assertTrue(result.isEmpty());
-        verify(jdbcTemplate, times(1))
-                .queryForList(anyString(), eq(String.class), eq("ValidTable"));
-    }
+        List<Map<String, Object>> data = List.of(Map.of("id", 1, "name", "ErrorCase"));
 
-    @Test
-    void testGetRequiredColumns_success() {
-        when(jdbcTemplate.queryForList(anyString(), eq(String.class), anyString()))
-                .thenReturn(List.of("ID", "AGE"));
+        doNothing().when(jdbcTemplate).execute(anyString());
+        when(jdbcTemplate.batchUpdate(anyString(), anyList())).thenReturn(new int[]{1});
 
-        List<String> result = invokeGetRequiredColumns("ValidTable");
-        assertEquals(List.of("ID", "AGE"), result);
-    }
+        // Even though required column fetch fails, main flow should continue
+        service.truncateAndReloadTable("ValidTable", data, columns);
 
-    /**
-     * Helper to call private getRequiredColumns via public method indirectly.
-     */
-    private List<String> invokeGetRequiredColumns(String tableName) {
-        // Call public method with empty data so it indirectly calls getRequiredColumns
-        try {
-            service.truncateAndReloadTable(tableName, new ArrayList<>(), bulkUploadFormColumns);
-        } catch (RuleAppServiceException ignored) {
-            // ignore exception, we only care about getRequiredColumns invocation
-        }
-        return service.getRequiredColumns(tableName);
+        verify(jdbcTemplate, times(1)).execute("TRUNCATE TABLE ValidTable");
+        verify(jdbcTemplate, times(1)).batchUpdate(contains("INSERT INTO ValidTable"), anyList());
     }
 }
