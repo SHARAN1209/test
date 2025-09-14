@@ -1,13 +1,32 @@
+package com.example.ruleapp.service;
+
+import com.example.ruleapp.dto.LookUpTableResponse;
+import com.example.ruleapp.dto.RuleAppErrorResponse;
+import com.example.ruleapp.exception.SpirException;
+import com.example.ruleapp.util.OPAUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.core.ParameterizedTypeReference;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpMethod;
+import org.springframework.stereotype.Service;
+import org.springframework.web.client.HttpClientErrorException;
+import org.springframework.web.client.HttpServerErrorException;
+import com.fasterxml.jackson.databind.ObjectMapper;
+
+import java.util.List;
+
 @Service
 public class RuleAppService {
 
-    @Autowired
-    private RestConnector restConnector;
-
     private static final Logger logger = LoggerFactory.getLogger(RuleAppService.class);
 
+    @Autowired
+    private RestConnector restConnector;  // Existing connector (cannot be changed)
+
     /**
-     * Fetches lookup table details from RuleApp based on group names.
+     * Fetch Lookup Tables by Groups.
      */
     public List<LookUpTableResponse> getLookUpTablesByGroups(List<String> groups) {
         List<LookUpTableResponse> response = null;
@@ -15,11 +34,12 @@ public class RuleAppService {
         try {
             String name = "ruleAppGetTablesByGroups";
             String enableRuleApp = OPAUtils.getEnbleRuleApp(name);
+
             String accessToken;
             String url;
             String method;
 
-            // Decide whether to use RuleApp configuration or default configuration
+            // Decide whether to use RuleApp or fallback config
             if (Boolean.parseBoolean(enableRuleApp)) {
                 accessToken = loginRuleApp();
                 url = OPAUtils.getURLRuleApp(name);
@@ -30,43 +50,75 @@ public class RuleAppService {
                 method = OPAUtils.getMethod(name);
             }
 
-            logger.info("Calling RuleApp API: {} with method: {}", url, method);
+            logger.info("Calling RuleApp API: {} with method {}", url, method);
 
-            // Prepare headers
+            // Build headers
             HttpHeaders headers = new HttpHeaders();
             headers.set(HttpHeaders.AUTHORIZATION, "Bearer " + accessToken);
             headers.set(HttpHeaders.CONTENT_TYPE, "application/json");
 
-            // Call using central restConnector
+            // Make the call via RestConnector
             response = restConnector.connect(
-                url,
-                HttpMethod.valueOf(method),
-                headers,
-                groups,
-                new ParameterizedTypeReference<List<LookUpTableResponse>>() {}
+                    url,
+                    HttpMethod.valueOf(method),
+                    headers,
+                    groups,
+                    new ParameterizedTypeReference<List<LookUpTableResponse>>() {}
             );
 
-            logger.info("Successfully retrieved {} lookup tables", 
-                        response != null ? response.size() : 0);
+            logger.info("Successfully retrieved {} tables from RuleApp",
+                    response != null ? response.size() : 0);
 
-        } catch (SpirException spirException) {
-            logger.error("Error while connecting to RuleApp API: {}", spirException.getMessage(), spirException);
-            throw new SpirException(ErrorCodes.ERR_O003, "Error while connecting to RuleApp Lookup Tables REST Service.");
+        } catch (HttpClientErrorException e) {
+            // Handles 4xx errors
+            logger.error("RuleApp client error: {}", e.getResponseBodyAsString());
+            RuleAppErrorResponse errorResponse = parseErrorResponse(e.getResponseBodyAsString());
+            throw new SpirException(errorResponse.getCode(), errorResponse.getMessage());
+
+        } catch (HttpServerErrorException e) {
+            // Handles 5xx errors
+            logger.error("RuleApp server error: {}", e.getResponseBodyAsString());
+            RuleAppErrorResponse errorResponse = parseErrorResponse(e.getResponseBodyAsString());
+            throw new SpirException(errorResponse.getCode(), errorResponse.getMessage());
+
+        } catch (SpirException se) {
+            // Pass through custom SpirExceptions
+            logger.error("RuleApp SpirException: {}", se.getMessage(), se);
+            throw se;
+
         } catch (Exception e) {
+            // Unexpected error
             logger.error("Unexpected error while calling RuleApp API: {}", e.getMessage(), e);
-            throw new SpirException(ErrorCodes.ERR_C003, "Unexpected error while connecting to RuleApp Lookup Tables REST Service.");
+            throw new SpirException("ERR_C003", "Unexpected error while connecting to RuleApp service.");
         }
 
         return response;
     }
 
-    private String loginRuleApp() {
-        // Logic to get RuleApp access token
-        return "mock-token-ruleapp"; 
+    /**
+     * Parses error JSON into RuleAppErrorResponse.
+     */
+    private RuleAppErrorResponse parseErrorResponse(String json) {
+        try {
+            ObjectMapper mapper = new ObjectMapper();
+            return mapper.readValue(json, RuleAppErrorResponse.class);
+        } catch (Exception ex) {
+            logger.error("Failed to parse error response JSON: {}", json, ex);
+            return new RuleAppErrorResponse("Unknown error occurred", "UNKNOWN_ERROR");
+        }
     }
 
+    /**
+     * Simulates RuleApp login.
+     */
+    private String loginRuleApp() {
+        return "mock-token-ruleapp";
+    }
+
+    /**
+     * Simulates default login.
+     */
     private String login() {
-        // Logic to get default access token
         return "mock-token-default";
     }
 }
