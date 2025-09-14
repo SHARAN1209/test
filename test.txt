@@ -1,116 +1,72 @@
-package com.bakerhughes.ruleapp.controller;
+@Service
+public class RuleAppService {
 
-import com.bakerhughes.ruleapp.dto.LookUpTableResponse;
-import com.bakerhughes.ruleapp.dto.RuleAppTableVersionResponse;
-import com.bakerhughes.ruleapp.service.ExcelUploadService;
-import com.bakerhughes.ruleapp.service.RuleappDAO;
-import com.fasterxml.jackson.core.JsonProcessingException;
-import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Test;
-import org.mockito.InjectMocks;
-import org.mockito.Mock;
-import org.mockito.MockitoAnnotations;
-import org.springframework.http.HttpStatus;
-import org.springframework.http.ResponseEntity;
-import org.springframework.web.multipart.MultipartFile;
+    @Autowired
+    private RestConnector restConnector;
 
-import java.util.*;
+    private static final Logger logger = LoggerFactory.getLogger(RuleAppService.class);
 
-import static org.junit.jupiter.api.Assertions.*;
-import static org.mockito.ArgumentMatchers.*;
-import static org.mockito.Mockito.*;
+    /**
+     * Fetches lookup table details from RuleApp based on group names.
+     */
+    public List<LookUpTableResponse> getLookUpTablesByGroups(List<String> groups) {
+        List<LookUpTableResponse> response = null;
 
-class RuleappControllerTest {
+        try {
+            String name = "ruleAppGetTablesByGroups";
+            String enableRuleApp = OPAUtils.getEnbleRuleApp(name);
+            String accessToken;
+            String url;
+            String method;
 
-    @Mock
-    private RuleappDAO ruleappDAO;
+            // Decide whether to use RuleApp configuration or default configuration
+            if (Boolean.parseBoolean(enableRuleApp)) {
+                accessToken = loginRuleApp();
+                url = OPAUtils.getURLRuleApp(name);
+                method = OPAUtils.getMethodRuleApp(name);
+            } else {
+                accessToken = login();
+                url = OPAUtils.getURL(name);
+                method = OPAUtils.getMethod(name);
+            }
 
-    @Mock
-    private ExcelUploadService excelUploadService;
+            logger.info("Calling RuleApp API: {} with method: {}", url, method);
 
-    @Mock
-    private MultipartFile multipartFile;
+            // Prepare headers
+            HttpHeaders headers = new HttpHeaders();
+            headers.set(HttpHeaders.AUTHORIZATION, "Bearer " + accessToken);
+            headers.set(HttpHeaders.CONTENT_TYPE, "application/json");
 
-    @InjectMocks
-    private RuleappController ruleappController;
+            // Call using central restConnector
+            response = restConnector.connect(
+                url,
+                HttpMethod.valueOf(method),
+                headers,
+                groups,
+                new ParameterizedTypeReference<List<LookUpTableResponse>>() {}
+            );
 
-    @BeforeEach
-    void setUp() {
-        MockitoAnnotations.openMocks(this);
+            logger.info("Successfully retrieved {} lookup tables", 
+                        response != null ? response.size() : 0);
+
+        } catch (SpirException spirException) {
+            logger.error("Error while connecting to RuleApp API: {}", spirException.getMessage(), spirException);
+            throw new SpirException(ErrorCodes.ERR_O003, "Error while connecting to RuleApp Lookup Tables REST Service.");
+        } catch (Exception e) {
+            logger.error("Unexpected error while calling RuleApp API: {}", e.getMessage(), e);
+            throw new SpirException(ErrorCodes.ERR_C003, "Unexpected error while connecting to RuleApp Lookup Tables REST Service.");
+        }
+
+        return response;
     }
 
-    @Test
-    void testGetLookUpTablesByGroups() {
-        List<String> groups = Arrays.asList("group1", "group2");
-        List<LookUpTableResponse> mockResponse = new ArrayList<>();
-        mockResponse.add(new LookUpTableResponse());
-
-        when(ruleappDAO.getTablesByGroups(groups)).thenReturn(mockResponse);
-
-        ResponseEntity<List<LookUpTableResponse>> response = ruleappController.getLookUpTablesByGroups(groups);
-
-        assertEquals(HttpStatus.OK, response.getStatusCode());
-        assertEquals(mockResponse, response.getBody());
-        verify(ruleappDAO, times(1)).getTablesByGroups(groups);
+    private String loginRuleApp() {
+        // Logic to get RuleApp access token
+        return "mock-token-ruleapp"; 
     }
 
-    @Test
-    void testGetVersions() {
-        String tableId = "123";
-        boolean isAdmin = true;
-        List<String> groups = Arrays.asList("group1");
-
-        List<RuleAppTableVersionResponse> mockResponse = new ArrayList<>();
-        mockResponse.add(new RuleAppTableVersionResponse());
-
-        when(ruleappDAO.getVersions(tableId, isAdmin)).thenReturn(mockResponse);
-
-        ResponseEntity<List<RuleAppTableVersionResponse>> response =
-                ruleappController.getVersions(tableId, groups, isAdmin);
-
-        assertEquals(HttpStatus.OK, response.getStatusCode());
-        assertEquals(mockResponse, response.getBody());
-        verify(ruleappDAO, times(1)).getVersions(tableId, isAdmin);
-    }
-
-    @Test
-    void testGetItemsByTableAndVersion() throws JsonProcessingException {
-        String tableId = "table1";
-        String version = "v1";
-        List<String> groups = Arrays.asList("group1", "group2");
-
-        List<Map<String, Object>> mockResponse = new ArrayList<>();
-        Map<String, Object> item = new HashMap<>();
-        item.put("key", "value");
-        mockResponse.add(item);
-
-        when(ruleappDAO.getItems(tableId, version, groups)).thenReturn(mockResponse);
-
-        ResponseEntity<List<Map<String, Object>>> response =
-                ruleappController.getItemsByTableAndVersion(tableId, version, groups);
-
-        assertEquals(HttpStatus.OK, response.getStatusCode());
-        assertEquals(mockResponse, response.getBody());
-        verify(ruleappDAO, times(1)).getItems(tableId, version, groups);
-    }
-
-    @Test
-    void testUploadExcelFile() {
-        String tableId = "table123";
-        List<String> groups = Arrays.asList("group1");
-        String currentUser = "user1";
-
-        Map<String, Object> mockResult = new HashMap<>();
-        mockResult.put("status", "success");
-
-        when(excelUploadService.uploadExcelFile(eq(tableId), eq(groups), eq(multipartFile), eq(currentUser)))
-                .thenReturn(mockResult);
-
-        ResponseEntity<Map<String, Object>> response =
-                ruleappController.uploadExcelFile(tableId, groups, multipartFile, currentUser);
-
-        assertEquals(HttpStatus.OK, response.getStatusCode());
-        assertEquals(mockResult, response.getBody());
-        verify(excelUploadService, times(1)).uploadExcelFile(tableId, groups, multipartFile, currentUser);
+    private String login() {
+        // Logic to get default access token
+        return "mock-token-default";
     }
 }
