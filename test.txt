@@ -1,37 +1,174 @@
-private Map<String, Object> processRow(Row row, List<BulkUploadFormColumn> form,
-        Map<String, Integer> columnIndexMap, List<ValidationError> errors, int rowIndex) {
+package com.bakerhughes.ruleapp.service;
 
-    Map<String, Object> rowData = new HashMap<>();
+import com.bakerhughes.ruleapp.entity.RuleAppTableVersionEntity;
+import com.bakerhughes.ruleapp.repository.RuleAppHistoricalDataRepository;
+import com.bakerhughes.ruleapp.repository.RuleAppTableVersionRepository;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.scheduling.annotation.Scheduled;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
-    for (BulkUploadFormColumn col : form) {
-        Integer columnIndex = columnIndexMap.get(col.getExcelColumnName());
-        if (columnIndex == null) continue;
+import java.time.LocalDateTime;
+import java.util.List;
+import java.util.Map;
+import java.util.stream.Collectors;
 
-        String cellValue = getCellValueAsString(row.getCell(columnIndex));
+@Service
+@RequiredArgsConstructor
+@Slf4j
+public class DataPurgeService {
 
-        // **NEW LOGIC: Handle required vs optional fields**
-        if (col.isRequired() && (cellValue == null || cellValue.isBlank())) {
-            throw new RuleAppServiceException(ErrorCode.MISSING_REQUIRED_COLUMN_VALUE,
-                    String.format("Missing required value in row %d, column %d (%s)",
-                            rowIndex + 1, columnIndex + 1, col.getExcelColumnName()),
-                    null, null, HttpStatus.BAD_REQUEST);
+    private final RuleAppTableVersionRepository tableVersionRepository;
+    private final RuleAppHistoricalDataRepository historicalDataRepository;
+
+    /**
+     * Hourly purge job: Removes old sub-versions keeping the latest one.
+     */
+    @Scheduled(cron = "0 0 * * * *") // Run every hour
+    @Transactional
+    public void purgeOldSubVersions() {
+        int configurableDays = 30; // configurable via properties or DB
+
+        LocalDateTime cutoffDate = LocalDateTime.now().minusDays(configurableDays);
+        log.info("Starting purge of old sub-versions before cutoff date: {}", cutoffDate);
+
+        // Step 1: Fetch old sub-versions
+        List<RuleAppTableVersionEntity> oldSubVersions = tableVersionRepository.findOldSubVersions(cutoffDate);
+
+        if (oldSubVersions.isEmpty()) {
+            log.info("No old sub-versions found for cleanup.");
+            return;
         }
 
-        // If optional and value is blank, just skip it
-        if (!col.isRequired() && (cellValue == null || cellValue.isBlank())) {
-            rowData.put(col.getColumnName(), null);
-            continue;
-        }
+        // Group by tableId -> version
+        Map<String, Map<Integer, List<RuleAppTableVersionEntity>>> grouped = oldSubVersions.stream()
+            .collect(Collectors.groupingBy(
+                RuleAppTableVersionEntity::getTableId,
+                Collectors.groupingBy(RuleAppTableVersionEntity::getVersion)
+            ));
 
-        // Regex validation (only if value is present)
-        if (col.getRegexPattern() != null && !cellValue.isEmpty()
-                && !Pattern.matches(col.getRegexPattern(), cellValue)) {
-            errors.add(new ValidationError(rowIndex + 1, columnIndex + 1, col.getExcelColumnName(),
-                    cellValue, "Value does not match regex pattern"));
-        }
+        // Step 2: Process each group
+        grouped.forEach((tableId, versionMap) -> versionMap.forEach((version, records) -> {
+            log.info("Processing tableId={} version={} with {} sub-versions", tableId, version, records.size());
 
-        // Type casting
-        rowData.put(col.getColumnName(), castValue(cellValue, col.getCastTo()));
+            List<RuleAppTableVersionEntity> orderedRecords =
+                    tableVersionRepository.findSubVersionsForTableAndVersion(tableId, version);
+
+            if (orderedRecords.size() > 1) {
+                List<RuleAppTableVersionEntity> toDelete = orderedRecords.subList(1, orderedRecords.size());
+
+                for (RuleAppTableVersionEntity entity : toDelete) {
+                    // Combine version and subVersion into one string like "1.2"
+                    String combinedVersion = entity.getVersion() + "." + entity.getSubVersion();
+
+                    // Delete related historical data first
+                    historicalDataRepository.deleteByTableIdAndCombinedVersion(entity.getTableId(), combinedVersion);
+
+                    // Then delete the sub-version record
+                    tableVersionRepository.delete(entity);
+
+                    log.info("Deleted sub-version {} (combinedVersion={}) for tableId={} version={}",
+                             entity.getSubVersion(), combinedVersion, entity.getTableId(), entity.getVersion());
+                }
+            } else {
+                log.info("No extra sub-versions to delete for tableId={} version={}", tableId, version);
+            }
+        }));
+
+        log.info("Completed purge of old sub-versions.");
     }
-    return rowData;
+
+    /**
+     * Daily purge job: Removes old historical data and associated version records.
+     */
+    @Scheduled(cron = "0 0 0 * * *") // Run every day at midnight
+    @Transactional
+    public void purgeOldData() {
+        int configurableDays = 90; // configurable via properties or DB
+
+        LocalDateTime cutoffDate = LocalDateTime.now().minusDays(configurableDays);
+        log.info("Starting purge of old data before cutoff date: {}", cutoffDate);
+
+        // Step 1: Fetch old records
+        List<RuleAppTableVersionEntity> oldRecords = tableVersionRepository.findOldRecords(cutoffDate);
+
+        if (oldRecords.isEmpty()) {
+            log.info("No old records found for purge.");
+            return;
+        }
+
+        // Step 2: Remove historical data and table version entries
+        for (RuleAppTableVersionEntity record : oldRecords) {
+            // Combine version + subVersion
+            String combinedVersion = record.getVersion() + "." + record.getSubVersion();
+
+            // Delete historical data first
+            historicalDataRepository.deleteByTableIdAndCombinedVersion(record.getTableId(), combinedVersion);
+
+            // Then delete the version record
+            tableVersionRepository.delete(record);
+
+            log.info("Deleted historical and version record for tableId={} combinedVersion={}", 
+                     record.getTableId(), combinedVersion);
+        }
+
+        log.info("Completed purge of old data.");
+    }
 }
+
+
+package com.bakerhughes.ruleapp.repository;
+
+import com.bakerhughes.ruleapp.entity.RuleappHistoricalDataEntity;
+import org.springframework.data.jpa.repository.*;
+import org.springframework.data.repository.query.Param;
+import org.springframework.stereotype.Repository;
+
+@Repository
+public interface RuleAppHistoricalDataRepository extends JpaRepository<RuleappHistoricalDataEntity, RuleappHistoricalDataEntity.PK> {
+
+    /**
+     * Deletes historical data using the combined version string like "1.2"
+     */
+    @Modifying
+    @Query("DELETE FROM RuleappHistoricalDataEntity h " +
+           "WHERE h.tableId = :tableId AND h.version = :combinedVersion")
+    void deleteByTableIdAndCombinedVersion(@Param("tableId") String tableId,
+                                           @Param("combinedVersion") String combinedVersion);
+}
+
+package com.bakerhughes.ruleapp.repository;
+
+import com.bakerhughes.ruleapp.entity.RuleAppTableVersionEntity;
+import org.springframework.data.jpa.repository.*;
+import org.springframework.data.repository.query.Param;
+import org.springframework.stereotype.Repository;
+
+import java.time.LocalDateTime;
+import java.util.List;
+
+@Repository
+public interface RuleAppTableVersionRepository extends JpaRepository<RuleAppTableVersionEntity, RuleAppTableVersionEntity.PK> {
+
+    @Query("SELECT r FROM RuleAppTableVersionEntity r " +
+           "WHERE r.createdDate < :cutoffDate AND r.subVersion > 0")
+    List<RuleAppTableVersionEntity> findOldSubVersions(@Param("cutoffDate") LocalDateTime cutoffDate);
+
+    @Query("SELECT r FROM RuleAppTableVersionEntity r " +
+           "WHERE r.tableId = :tableId AND r.version = :version AND r.validityEnd IS NOT NULL " +
+           "ORDER BY r.validityStart DESC")
+    List<RuleAppTableVersionEntity> findSubVersionsForTableAndVersion(@Param("tableId") String tableId,
+                                                                      @Param("version") Integer version);
+
+    @Query("SELECT r FROM RuleAppTableVersionEntity r " +
+           "WHERE r.validityEnd IS NOT NULL AND r.validityStart < :cutoffDate")
+    List<RuleAppTableVersionEntity> findOldRecords(@Param("cutoffDate") LocalDateTime cutoffDate);
+}
+
+# Configurable purge periods
+purge.subversion.days=30
+purge.olddata.days=90
+
+# Scheduler thread pool
+spring.task.scheduling.pool.size=5
