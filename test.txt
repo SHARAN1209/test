@@ -172,3 +172,50 @@ purge.olddata.days=90
 
 # Scheduler thread pool
 spring.task.scheduling.pool.size=5
+
+package com.bakerhughes.ruleapp.repository;
+
+import com.bakerhughes.ruleapp.entity.RuleAppTableVersionEntity;
+import com.bakerhughes.ruleapp.entity.RuleAppTableVersionEntity.PK;
+import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.stereotype.Repository;
+
+import java.time.LocalDateTime;
+import java.util.List;
+
+@Repository
+public interface RuleAppTableVersionRepository extends JpaRepository<RuleAppTableVersionEntity, PK> {
+
+    /**
+     * Find old sub-versions where createdDate < cutoffDate and subVersion > 0
+     */
+    List<RuleAppTableVersionEntity> findByCreatedDateBeforeAndSubVersionGreaterThan(LocalDateTime cutoffDate, Integer subVersion);
+
+    /**
+     * Find sub-versions for a given tableId and version, where validityEnd is not null.
+     * Results ordered by validityStart descending.
+     */
+    List<RuleAppTableVersionEntity> findByTableIdAndVersionAndValidityEndIsNotNullOrderByValidityStartDesc(String tableId, Integer version);
+
+    /**
+     * Find old records where validityEnd is not null and validityStart < cutoffDate
+     */
+    List<RuleAppTableVersionEntity> findByValidityEndIsNotNullAndValidityStartBefore(LocalDateTime cutoffDate);
+}
+
+package com.bakerhughes.ruleapp.repository;
+
+import com.bakerhughes.ruleapp.entity.RuleappHistoricalDataEntity;
+import com.bakerhughes.ruleapp.entity.RuleappHistoricalDataEntity.PK;
+import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.stereotype.Repository;
+
+@Repository
+public interface RuleAppHistoricalDataRepository extends JpaRepository<RuleappHistoricalDataEntity, PK> {
+
+    /**
+     * Delete by tableId and combined version (e.g., "1.2")
+     */
+    void deleteByTableIdAndVersion(String tableId, String version);
+}
+
