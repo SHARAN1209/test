@@ -260,3 +260,60 @@ public class RuleappService {
         Map<String, Object> result = ruleappService.uploadExcelFile(tableId, groups, file, currentUser);
         return new ResponseEntity<>(result, HttpStatus.OK);
     }
+
+public Map<String, Object> uploadExcelFile(String tableId, List<String> groups, MultipartFile file, String currentUser) {
+    Map<String, Object> response = null;
+
+    try {
+        String name = "ruleAppUploadExcelFile";
+        String enableRuleApp = OPAUtils.getEnbleRuleApp(name);
+        String accessToken;
+        String url;
+        String method;
+
+        // Determine which login to use
+        if (Boolean.parseBoolean(enableRuleApp)) {
+            accessToken = loginRuleApp();
+            url = OPAUtils.getURLRuleApp(name).replace("{tableId}", tableId);
+            method = OPAUtils.getMethodRuleApp(name);
+        } else {
+            accessToken = login();
+            url = OPAUtils.getURL(name).replace("{tableId}", tableId);
+            method = OPAUtils.getMethod(name);
+        }
+
+        logger.info("Calling RuleApp API for Excel Upload: {} with method: {}", url, method);
+
+        // Prepare multipart form data
+        MultiValueMap<String, Object> body = new LinkedMultiValueMap<>();
+        body.add("file", file.getResource());  // <-- directly use MultipartFile resource
+        body.add("groups", String.join(",", groups)); // Convert list to comma-separated string
+        body.add("currentUser", currentUser);
+
+        // Headers
+        HttpHeaders headers = new HttpHeaders();
+        headers.set(HttpHeaders.AUTHORIZATION, "Bearer " + accessToken);
+        headers.setContentType(MediaType.MULTIPART_FORM_DATA);
+
+        // Call RuleApp via centralized restConnector
+        response = restConnector.connect(
+            url,
+            HttpMethod.valueOf(method),
+            headers,
+            body,
+            Map.class
+        );
+
+        logger.info("Excel file upload successful for tableId: {}", tableId);
+
+    } catch (SpirException spirException) {
+        logger.error("Error while uploading Excel file: {}", spirException.getMessage(), spirException);
+        throw new SpirException(ErrorCodes.ERR_O003, "Error while connecting to RuleApp Excel Upload REST Service.");
+    } catch (Exception e) {
+        logger.error("Unexpected error while calling RuleApp Excel Upload API: {}", e.getMessage(), e);
+        throw new SpirException(ErrorCodes.ERR_C003, "Unexpected error while connecting to RuleApp Excel Upload REST Service.");
+    }
+
+    return response;
+}
+
