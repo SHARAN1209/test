@@ -1,9 +1,17 @@
-// Save MultipartFile temporarily
-File convFile = File.createTempFile("upload-", file.getOriginalFilename());
-file.transferTo(convFile);
-
-// Build body
 MultiValueMap<String, Object> body = new LinkedMultiValueMap<>();
-body.add("file", new FileSystemResource(convFile)); // ✅ important: use FileSystemResource
+body.add("file", new FileSystemResource(convFile));
 body.add("groups", String.join(",", groups));
 body.add("currentUser", currentUser);
+
+// Wrap body in HttpEntity BEFORE calling connect
+HttpEntity<MultiValueMap<String, Object>> entity =
+        new HttpEntity<>(body, headers);
+
+// Then call connect using entity, not raw body
+response = restConnector.connect(
+    url,
+    HttpMethod.valueOf(method),
+    headers,
+    entity,      // ✅ pass HttpEntity
+    Map.class
+);
