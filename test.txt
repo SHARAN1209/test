@@ -38,3 +38,11 @@ try {
     log.error("Unexpected error while calling REST API", ex);
     throw new CustomAPIException("Unexpected error", "INTERNAL_ERROR", 500);
 }
+
+
+body.add("file", new ByteArrayResource(file.getBytes()) {
+    @Override
+    public String getFilename() {
+        return file.getOriginalFilename(); // important for multipart
+    }
+});
