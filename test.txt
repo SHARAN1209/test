@@ -1,48 +1,9 @@
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import org.springframework.web.client.HttpClientErrorException;
-import org.springframework.web.client.RestTemplate;
-import org.springframework.http.HttpMethod;
+// Save MultipartFile temporarily
+File convFile = File.createTempFile("upload-", file.getOriginalFilename());
+file.transferTo(convFile);
 
-try {
-    Object response = restConnector.connect(url, HttpMethod.GET, headers, null, Object.class);
-    return response;
-} catch (HttpClientErrorException ex) {
-    // This will catch 4xx errors like 400, 401, 404, etc.
-    String responseBody = ex.getResponseBodyAsString();
-    int statusCode = ex.getStatusCode().value();
-
-    // Parse the response dynamically
-    ObjectMapper mapper = new ObjectMapper();
-    String code = "UNKNOWN_ERROR";
-    String message = "An unexpected error occurred";
-
-    try {
-        JsonNode root = mapper.readTree(responseBody);
-        if (root.has("code")) {
-            code = root.get("code").asText();
-        }
-        if (root.has("message")) {
-            message = root.get("message").asText();
-        }
-    } catch (Exception parseEx) {
-        // Fallback if parsing fails
-        message = responseBody;
-    }
-
-    log.error("REST API Error - Status: {}, Code: {}, Message: {}", statusCode, code, message);
-
-    // Optionally throw a custom exception with these details
-    throw new CustomAPIException(message, code, statusCode);
-} catch (Exception ex) {
-    log.error("Unexpected error while calling REST API", ex);
-    throw new CustomAPIException("Unexpected error", "INTERNAL_ERROR", 500);
-}
-
-
-body.add("file", new ByteArrayResource(file.getBytes()) {
-    @Override
-    public String getFilename() {
-        return file.getOriginalFilename(); // important for multipart
-    }
-});
+// Build body
+MultiValueMap<String, Object> body = new LinkedMultiValueMap<>();
+body.add("file", new FileSystemResource(convFile)); // ✅ important: use FileSystemResource
+body.add("groups", String.join(",", groups));
+body.add("currentUser", currentUser);
