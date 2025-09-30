@@ -1,17 +1,90 @@
+public <T, T1> T connect(String url,
+                         HttpMethod method,
+                         HttpHeaders headers,
+                         T1 request,
+                         Class<T> responseClass) throws SpirException {
+    ResponseEntity<T> responseEntity = null;
+    int failureCounter = 0;
+    int prevCounterValue = 0;
+
+    while (failureCounter < 1) {
+        try {
+            HttpEntity<?> httpEntity;
+
+            // ✅ Handle multipart/form-data
+            if (request instanceof MultiValueMap) {
+                if (headers.getContentType() == null) {
+                    headers.setContentType(MediaType.MULTIPART_FORM_DATA);
+                }
+                httpEntity = new HttpEntity<>((MultiValueMap<String, Object>) request, headers);
+            }
+            // ✅ Handle already wrapped HttpEntity
+            else if (request instanceof HttpEntity) {
+                httpEntity = (HttpEntity<?>) request;
+            }
+            // ✅ Default: JSON or plain object
+            else {
+                if (headers.getContentType() == null) {
+                    headers.setContentType(MediaType.APPLICATION_JSON);
+                }
+                httpEntity = new HttpEntity<>(request, headers);
+            }
+
+            URI uri = new URI(url);
+            responseEntity = getRestTemplate().exchange(uri, method, httpEntity, responseClass);
+
+        } catch (HttpClientErrorException ex) {
+            // Handle 4xx errors
+            String responseBody = ex.getResponseBodyAsString();
+            int statusCode = ex.getStatusCode().value();
+
+            ObjectMapper mapper = new ObjectMapper();
+            String code = "UNKNOWN_ERROR";
+            String message = "An unexpected error occurred";
+
+            try {
+                JsonNode root = mapper.readTree(responseBody);
+                if (root.has("code")) {
+                    code = root.get("code").asText();
+                }
+                if (root.has("message")) {
+                    message = root.get("message").asText();
+                }
+            } catch (Exception parseEx) {
+                message = responseBody;
+            }
+
+            throw new SpirException(ErrorCodes.ERR_C003, "[" + code + "] " + message);
+
+        } catch (Exception e) {
+            logger.error("Error in Oracle connect : " + e.getMessage(), e);
+            failureCounter++;
+        }
+
+        if (prevCounterValue == failureCounter) {
+            break;
+        }
+        prevCounterValue = failureCounter;
+    }
+
+    if (failureCounter == 1) {
+        throw new SpirException(ErrorCodes.ERR_C003, "Error while connecting to REST Service.");
+    }
+
+    return responseEntity != null ? responseEntity.getBody() : null;
+}
+
+
+HttpHeaders headers = new HttpHeaders();
 MultiValueMap<String, Object> body = new LinkedMultiValueMap<>();
 body.add("file", new FileSystemResource(convFile));
 body.add("groups", String.join(",", groups));
 body.add("currentUser", currentUser);
 
-// Wrap body in HttpEntity BEFORE calling connect
-HttpEntity<MultiValueMap<String, Object>> entity =
-        new HttpEntity<>(body, headers);
-
-// Then call connect using entity, not raw body
-response = restConnector.connect(
-    url,
-    HttpMethod.valueOf(method),
-    headers,
-    entity,      // ✅ pass HttpEntity
-    Map.class
+Map<String, Object> response = restConnector.connect(
+        "http://localhost:8080/ruleapp/tables/test_table_1/versions",
+        HttpMethod.POST,
+        headers,
+        body,
+        Map.class
 );
