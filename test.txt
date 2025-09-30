@@ -1,319 +1,40 @@
-# Table Versions API
-inspire.ruleapp.ruleAppGetTableVersions.enabled=true
-inspire.ruleapp.ruleAppGetTableVersions.url=/tables_versions
-inspire.ruleapp.ruleAppGetTableVersions.method=POST
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.springframework.web.client.HttpClientErrorException;
+import org.springframework.web.client.RestTemplate;
+import org.springframework.http.HttpMethod;
 
-# Table Items API
-inspire.ruleapp.ruleAppGetTableItems.enabled=true
-inspire.ruleapp.ruleAppGetTableItems.url=/table_items
-inspire.ruleapp.ruleAppGetTableItems.method=POST
+try {
+    Object response = restConnector.connect(url, HttpMethod.GET, headers, null, Object.class);
+    return response;
+} catch (HttpClientErrorException ex) {
+    // This will catch 4xx errors like 400, 401, 404, etc.
+    String responseBody = ex.getResponseBodyAsString();
+    int statusCode = ex.getStatusCode().value();
 
-# Excel Upload API
-inspire.ruleapp.ruleAppUploadExcelFile.enabled=true
-inspire.ruleapp.ruleAppUploadExcelFile.url=/tables/{tableId}/versions
-inspire.ruleapp.ruleAppUploadExcelFile.method=POST
-
-
-public List<RuleAppTableVersionResponse> getTableVersions(String tableId, boolean isAdmin) {
-    List<RuleAppTableVersionResponse> response = null;
+    // Parse the response dynamically
+    ObjectMapper mapper = new ObjectMapper();
+    String code = "UNKNOWN_ERROR";
+    String message = "An unexpected error occurred";
 
     try {
-        String name = "ruleAppGetTableVersions";
-        String enableRuleApp = OPAUtils.getEnbleRuleApp(name);
-        String accessToken;
-        String url;
-        String method;
-
-        if (Boolean.parseBoolean(enableRuleApp)) {
-            accessToken = loginRuleApp();
-            url = OPAUtils.getURLRuleApp(name);
-            method = OPAUtils.getMethodRuleApp(name);
-        } else {
-            accessToken = login();
-            url = OPAUtils.getURL(name);
-            method = OPAUtils.getMethod(name);
+        JsonNode root = mapper.readTree(responseBody);
+        if (root.has("code")) {
+            code = root.get("code").asText();
         }
-
-        logger.info("Calling RuleApp API: {} with method: {}", url, method);
-
-        // Prepare request payload
-        Map<String, Object> requestBody = new HashMap<>();
-        requestBody.put("tableId", tableId);
-        requestBody.put("admin", isAdmin);
-
-        // Prepare headers
-        HttpHeaders headers = new HttpHeaders();
-        headers.set(HttpHeaders.AUTHORIZATION, "Bearer " + accessToken);
-        headers.set(HttpHeaders.CONTENT_TYPE, "application/json");
-
-        // Make the REST call
-        response = restConnector.connect(
-            url,
-            HttpMethod.valueOf(method),
-            headers,
-            requestBody,
-            List.class
-        );
-
-        logger.info("Successfully retrieved {} table versions",
-                response != null ? response.size() : 0);
-
-    } catch (SpirException spirException) {
-        logger.error("Error while connecting to RuleApp Table Versions API: {}", spirException.getMessage(), spirException);
-        throw new SpirException(ErrorCodes.ERR_O003, "Error while connecting to RuleApp Table Versions REST Service.");
-    } catch (Exception e) {
-        logger.error("Unexpected error while calling RuleApp Table Versions API: {}", e.getMessage(), e);
-        throw new SpirException(ErrorCodes.ERR_C003, "Unexpected error while connecting to RuleApp Table Versions REST Service.");
-    }
-
-    return response;
-}
-
-
-public List<Map<String, Object>> getTableItems(String tableId, String version, List<String> groups) {
-    List<Map<String, Object>> response = null;
-
-    try {
-        String name = "ruleAppGetTableItems";
-        String enableRuleApp = OPAUtils.getEnbleRuleApp(name);
-        String accessToken;
-        String url;
-        String method;
-
-        if (Boolean.parseBoolean(enableRuleApp)) {
-            accessToken = loginRuleApp();
-            url = OPAUtils.getURLRuleApp(name);
-            method = OPAUtils.getMethodRuleApp(name);
-        } else {
-            accessToken = login();
-            url = OPAUtils.getURL(name);
-            method = OPAUtils.getMethod(name);
+        if (root.has("message")) {
+            message = root.get("message").asText();
         }
-
-        logger.info("Calling RuleApp API: {} with method: {}", url, method);
-
-        // Prepare request payload
-        Map<String, Object> requestBody = new HashMap<>();
-        requestBody.put("tableId", tableId);
-        requestBody.put("version", version);
-        requestBody.put("groups", groups);
-
-        // Prepare headers
-        HttpHeaders headers = new HttpHeaders();
-        headers.set(HttpHeaders.AUTHORIZATION, "Bearer " + accessToken);
-        headers.set(HttpHeaders.CONTENT_TYPE, "application/json");
-
-        // Make the REST call
-        response = restConnector.connect(
-            url,
-            HttpMethod.valueOf(method),
-            headers,
-            requestBody,
-            List.class
-        );
-
-        logger.info("Successfully retrieved {} table items",
-                response != null ? response.size() : 0);
-
-    } catch (SpirException spirException) {
-        logger.error("Error while connecting to RuleApp Table Items API: {}", spirException.getMessage(), spirException);
-        throw new SpirException(ErrorCodes.ERR_O003, "Error while connecting to RuleApp Table Items REST Service.");
-    } catch (Exception e) {
-        logger.error("Unexpected error while calling RuleApp Table Items API: {}", e.getMessage(), e);
-        throw new SpirException(ErrorCodes.ERR_C003, "Unexpected error while connecting to RuleApp Table Items REST Service.");
+    } catch (Exception parseEx) {
+        // Fallback if parsing fails
+        message = responseBody;
     }
 
-    return response;
+    log.error("REST API Error - Status: {}, Code: {}, Message: {}", statusCode, code, message);
+
+    // Optionally throw a custom exception with these details
+    throw new CustomAPIException(message, code, statusCode);
+} catch (Exception ex) {
+    log.error("Unexpected error while calling REST API", ex);
+    throw new CustomAPIException("Unexpected error", "INTERNAL_ERROR", 500);
 }
-
-
-public Map<String, Object> uploadExcelFile(String tableId, List<String> groups, MultipartFile file, String currentUser) {
-    Map<String, Object> response = null;
-
-    try {
-        String name = "ruleAppUploadExcelFile";
-        String enableRuleApp = OPAUtils.getEnbleRuleApp(name);
-        String accessToken;
-        String url;
-        String method;
-
-        if (Boolean.parseBoolean(enableRuleApp)) {
-            accessToken = loginRuleApp();
-            url = OPAUtils.getURLRuleApp(name).replace("{tableId}", tableId);
-            method = OPAUtils.getMethodRuleApp(name);
-        } else {
-            accessToken = login();
-            url = OPAUtils.getURL(name).replace("{tableId}", tableId);
-            method = OPAUtils.getMethod(name);
-        }
-
-        logger.info("Calling RuleApp API for Excel Upload: {} with method: {}", url, method);
-
-        // Prepare multipart form data
-        MultiValueMap<String, Object> body = new LinkedMultiValueMap<>();
-        body.add("file", new MultipartInputStreamFileResource(file.getInputStream(), file.getOriginalFilename()));
-        body.add("groups", groups);
-        body.add("currentUser", currentUser);
-
-        // Prepare headers
-        HttpHeaders headers = new HttpHeaders();
-        headers.set(HttpHeaders.AUTHORIZATION, "Bearer " + accessToken);
-        headers.setContentType(MediaType.MULTIPART_FORM_DATA);
-
-        // Make the REST call
-        response = restConnector.connect(
-            url,
-            HttpMethod.valueOf(method),
-            headers,
-            body,
-            Map.class
-        );
-
-        logger.info("Excel file upload successful for tableId: {}", tableId);
-
-    } catch (SpirException spirException) {
-        logger.error("Error while uploading Excel file: {}", spirException.getMessage(), spirException);
-        throw new SpirException(ErrorCodes.ERR_O003, "Error while connecting to RuleApp Excel Upload REST Service.");
-    } catch (Exception e) {
-        logger.error("Unexpected error while calling RuleApp Excel Upload API: {}", e.getMessage(), e);
-        throw new SpirException(ErrorCodes.ERR_C003, "Unexpected error while connecting to RuleApp Excel Upload REST Service.");
-    }
-
-    return response;
-}
-
-
-@Service
-public class RuleappService {
-
-    @Autowired
-    private OPADataManager opaDataManager;
-
-    public List<LookUpTableResponse> getAllowedTablesByGroups(List<String> roles) {
-        return opaDataManager.getLookUpTablesByGroups(roles);
-    }
-
-    public List<RuleAppTableVersionResponse> getTableVersions(String tableId, boolean isAdmin) {
-        return opaDataManager.getTableVersions(tableId, isAdmin);
-    }
-
-    public List<Map<String, Object>> getTableItems(String tableId, String version, List<String> groups) {
-        return opaDataManager.getTableItems(tableId, version, groups);
-    }
-
-    public Map<String, Object> uploadExcelFile(String tableId, List<String> groups, MultipartFile file, String currentUser) {
-        return opaDataManager.uploadExcelFile(tableId, groups, file, currentUser);
-    }
-}
-
-
-/**
-     * 2. Get table versions by tableId
-     */
-    @PostMapping(value = "tables_versions", produces = MediaType.APPLICATION_JSON_VALUE)
-    public ResponseEntity<List<RuleAppTableVersionResponse>> getTableVersions(
-            HttpServletRequest request,
-            @RequestParam("tableId") String tableId,
-            @RequestParam(value = "admin", defaultValue = "false") boolean isAdmin) {
-
-        // Extract groups from token if needed
-        final String requestTokenHeader = request.getHeader("Authorization");
-        String jwtToken = jwtTokenUtil.getJwtToken(requestTokenHeader);
-
-        List<RuleAppTableVersionResponse> response = ruleappService.getTableVersions(tableId, isAdmin);
-        return new ResponseEntity<>(response, HttpStatus.OK);
-    }
-
-    /**
-     * 3. Get table items by tableId and version
-     */
-    @PostMapping(value = "table_items", produces = MediaType.APPLICATION_JSON_VALUE)
-    public ResponseEntity<List<Map<String, Object>>> getTableItems(
-            HttpServletRequest request,
-            @RequestParam("tableId") String tableId,
-            @RequestParam("version") String version) {
-
-        // Extract groups from token
-        final String requestTokenHeader = request.getHeader("Authorization");
-        String jwtToken = jwtTokenUtil.getJwtToken(requestTokenHeader);
-        List<String> groups = jwtTokenUtil.getGroupsFromToken(jwtToken);
-
-        List<Map<String, Object>> response = ruleappService.getTableItems(tableId, version, groups);
-        return new ResponseEntity<>(response, HttpStatus.OK);
-    }
-
-    /**
-     * 4. Upload Excel file for a table
-     */
-    @PostMapping(value = "tables/{tableId}/versions", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
-    public ResponseEntity<Map<String, Object>> uploadExcelFile(
-            HttpServletRequest request,
-            @PathVariable("tableId") String tableId,
-            @RequestParam("file") MultipartFile file,
-            @RequestParam("currentUser") String currentUser) {
-
-        // Extract groups from JWT token
-        final String requestTokenHeader = request.getHeader("Authorization");
-        String jwtToken = jwtTokenUtil.getJwtToken(requestTokenHeader);
-        List<String> groups = jwtTokenUtil.getGroupsFromToken(jwtToken);
-
-        Map<String, Object> result = ruleappService.uploadExcelFile(tableId, groups, file, currentUser);
-        return new ResponseEntity<>(result, HttpStatus.OK);
-    }
-
-public Map<String, Object> uploadExcelFile(String tableId, List<String> groups, MultipartFile file, String currentUser) {
-    Map<String, Object> response = null;
-
-    try {
-        String name = "ruleAppUploadExcelFile";
-        String enableRuleApp = OPAUtils.getEnbleRuleApp(name);
-        String accessToken;
-        String url;
-        String method;
-
-        // Determine which login to use
-        if (Boolean.parseBoolean(enableRuleApp)) {
-            accessToken = loginRuleApp();
-            url = OPAUtils.getURLRuleApp(name).replace("{tableId}", tableId);
-            method = OPAUtils.getMethodRuleApp(name);
-        } else {
-            accessToken = login();
-            url = OPAUtils.getURL(name).replace("{tableId}", tableId);
-            method = OPAUtils.getMethod(name);
-        }
-
-        logger.info("Calling RuleApp API for Excel Upload: {} with method: {}", url, method);
-
-        // Prepare multipart form data
-        MultiValueMap<String, Object> body = new LinkedMultiValueMap<>();
-        body.add("file", file.getResource());  // <-- directly use MultipartFile resource
-        body.add("groups", String.join(",", groups)); // Convert list to comma-separated string
-        body.add("currentUser", currentUser);
-
-        // Headers
-        HttpHeaders headers = new HttpHeaders();
-        headers.set(HttpHeaders.AUTHORIZATION, "Bearer " + accessToken);
-        headers.setContentType(MediaType.MULTIPART_FORM_DATA);
-
-        // Call RuleApp via centralized restConnector
-        response = restConnector.connect(
-            url,
-            HttpMethod.valueOf(method),
-            headers,
-            body,
-            Map.class
-        );
-
-        logger.info("Excel file upload successful for tableId: {}", tableId);
-
-    } catch (SpirException spirException) {
-        logger.error("Error while uploading Excel file: {}", spirException.getMessage(), spirException);
-        throw new SpirException(ErrorCodes.ERR_O003, "Error while connecting to RuleApp Excel Upload REST Service.");
-    } catch (Exception e) {
-        logger.error("Unexpected error while calling RuleApp Excel Upload API: {}", e.getMessage(), e);
-        throw new SpirException(ErrorCodes.ERR_C003, "Unexpected error while connecting to RuleApp Excel Upload REST Service.");
-    }
-
-    return response;
-}
-
