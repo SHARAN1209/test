@@ -1,90 +1,64 @@
-public <T, T1> T connect(String url,
-                         HttpMethod method,
-                         HttpHeaders headers,
-                         T1 request,
-                         Class<T> responseClass) throws SpirException {
-    ResponseEntity<T> responseEntity = null;
-    int failureCounter = 0;
-    int prevCounterValue = 0;
+@Service
+public class ExcelUploadServiceMS2 {
 
-    while (failureCounter < 1) {
+    @Value("${microservice1.base.url}")
+    private String ms1BaseUrl; // e.g. http://localhost:8081
+
+    @Autowired
+    private RestTemplate restTemplate;
+
+    public Map<String, Object> uploadExcelFile(String tableId, List<String> groups, MultipartFile file, String currentUser) {
         try {
-            HttpEntity<?> httpEntity;
+            // Prepare MultiValueMap for multipart/form-data
+            MultiValueMap<String, Object> body = new LinkedMultiValueMap<>();
 
-            // ✅ Handle multipart/form-data
-            if (request instanceof MultiValueMap) {
-                if (headers.getContentType() == null) {
-                    headers.setContentType(MediaType.MULTIPART_FORM_DATA);
-                }
-                httpEntity = new HttpEntity<>((MultiValueMap<String, Object>) request, headers);
-            }
-            // ✅ Handle already wrapped HttpEntity
-            else if (request instanceof HttpEntity) {
-                httpEntity = (HttpEntity<?>) request;
-            }
-            // ✅ Default: JSON or plain object
-            else {
-                if (headers.getContentType() == null) {
-                    headers.setContentType(MediaType.APPLICATION_JSON);
-                }
-                httpEntity = new HttpEntity<>(request, headers);
+            // Add file (convert to Resource)
+            body.add("file", new MultipartInputStreamFileResource(file.getInputStream(), file.getOriginalFilename()));
+
+            // Add groups
+            for (String group : groups) {
+                body.add("groups", group);
             }
 
-            URI uri = new URI(url);
-            responseEntity = getRestTemplate().exchange(uri, method, httpEntity, responseClass);
+            // Add currentUser
+            body.add("currentUser", currentUser);
 
-        } catch (HttpClientErrorException ex) {
-            // Handle 4xx errors
-            String responseBody = ex.getResponseBodyAsString();
-            int statusCode = ex.getStatusCode().value();
+            HttpHeaders headers = new HttpHeaders();
+            headers.setContentType(MediaType.MULTIPART_FORM_DATA);
 
-            ObjectMapper mapper = new ObjectMapper();
-            String code = "UNKNOWN_ERROR";
-            String message = "An unexpected error occurred";
+            HttpEntity<MultiValueMap<String, Object>> requestEntity = new HttpEntity<>(body, headers);
 
-            try {
-                JsonNode root = mapper.readTree(responseBody);
-                if (root.has("code")) {
-                    code = root.get("code").asText();
-                }
-                if (root.has("message")) {
-                    message = root.get("message").asText();
-                }
-            } catch (Exception parseEx) {
-                message = responseBody;
-            }
+            String url = ms1BaseUrl + "/tables/" + tableId + "/versions";
 
-            throw new SpirException(ErrorCodes.ERR_C003, "[" + code + "] " + message);
+            ResponseEntity<Map> responseEntity = restTemplate.exchange(
+                    url,
+                    HttpMethod.POST,
+                    requestEntity,
+                    Map.class
+            );
 
+            return responseEntity.getBody();
         } catch (Exception e) {
-            logger.error("Error in Oracle connect : " + e.getMessage(), e);
-            failureCounter++;
+            throw new RuntimeException("Error while uploading file to microservice1", e);
         }
-
-        if (prevCounterValue == failureCounter) {
-            break;
-        }
-        prevCounterValue = failureCounter;
     }
-
-    if (failureCounter == 1) {
-        throw new SpirException(ErrorCodes.ERR_C003, "Error while connecting to REST Service.");
-    }
-
-    return responseEntity != null ? responseEntity.getBody() : null;
 }
 
+public class MultipartInputStreamFileResource extends InputStreamResource {
+    private final String filename;
 
-HttpHeaders headers = new HttpHeaders();
-MultiValueMap<String, Object> body = new LinkedMultiValueMap<>();
-body.add("file", new FileSystemResource(convFile));
-body.add("groups", String.join(",", groups));
-body.add("currentUser", currentUser);
+    public MultipartInputStreamFileResource(InputStream inputStream, String filename) {
+        super(inputStream);
+        this.filename = filename;
+    }
 
-Map<String, Object> response = restConnector.connect(
-        "http://localhost:8080/ruleapp/tables/test_table_1/versions",
-        HttpMethod.POST,
-        headers,
-        body,
-        Map.class
-);
+    @Override
+    public String getFilename() {
+        return this.filename;
+    }
+
+    @Override
+    public long contentLength() {
+        return -1; // we do not know
+    }
+}
