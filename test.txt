@@ -1,3 +1,22 @@
+@RestController
+@RequestMapping("/ms2/tables")
+public class ExcelUploadControllerMS2 {
+
+    @Autowired
+    private ExcelUploadServiceMS2 excelUploadServiceMS2;
+
+    @PostMapping("/{tableId}/versions")
+    public ResponseEntity<Map<String, Object>> uploadExcelFile(
+            @PathVariable String tableId,
+            @RequestParam("groups") List<String> groups,
+            @RequestParam("file") MultipartFile file,
+            @RequestParam("currentUser") String currentUser) {
+
+        Map<String, Object> result = excelUploadServiceMS2.uploadExcelFile(tableId, groups, file, currentUser);
+        return new ResponseEntity<>(result, HttpStatus.OK);
+    }
+}
+
 @Service
 public class ExcelUploadServiceMS2 {
 
@@ -62,24 +81,10 @@ public class MultipartInputStreamFileResource extends InputStreamResource {
         return -1; // we do not know
     }
 }
-
-public <T, R> T connect(String url,
-                            HttpMethod method,
-                            HttpHeaders headers,
-                            R body,
-                            Class<T> responseClass) {
-        try {
-            HttpEntity<R> requestEntity = new HttpEntity<>(body, headers);
-
-            ResponseEntity<T> responseEntity = restTemplate.exchange(
-                    url,
-                    method,
-                    requestEntity,
-                    responseClass
-            );
-
-            return responseEntity.getBody();
-        } catch (Exception e) {
-            throw new RuntimeException("Error while calling external service: " + url, e);
-        }
+@Configuration
+public class RestTemplateConfig {
+    @Bean
+    public RestTemplate restTemplate() {
+        return new RestTemplate();
     }
+}
