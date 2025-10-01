@@ -62,3 +62,24 @@ public class MultipartInputStreamFileResource extends InputStreamResource {
         return -1; // we do not know
     }
 }
+
+public <T, R> T connect(String url,
+                            HttpMethod method,
+                            HttpHeaders headers,
+                            R body,
+                            Class<T> responseClass) {
+        try {
+            HttpEntity<R> requestEntity = new HttpEntity<>(body, headers);
+
+            ResponseEntity<T> responseEntity = restTemplate.exchange(
+                    url,
+                    method,
+                    requestEntity,
+                    responseClass
+            );
+
+            return responseEntity.getBody();
+        } catch (Exception e) {
+            throw new RuntimeException("Error while calling external service: " + url, e);
+        }
+    }
