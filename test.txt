@@ -4,3 +4,5 @@ body.add("file", new ByteArrayResource(file.getBytes()) {
         return file.getOriginalFilename();
     }
 });
+String boundary = "----WebKitFormBoundary" + System.currentTimeMillis();
+headers.add(HttpHeaders.CONTENT_TYPE, "multipart/form-data; boundary=" + boundary);
