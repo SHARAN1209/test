@@ -1,8 +1,137 @@
-body.add("file", new ByteArrayResource(file.getBytes()) {
-    @Override
-    public String getFilename() {
-        return file.getOriginalFilename();
+package com.bhge.inspire.common.rest.connect;
+
+import java.net.URI;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.http.HttpEntity;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpMethod;
+import org.springframework.http.ResponseEntity;
+import org.springframework.http.client.SimpleClientHttpRequestFactory;
+import org.springframework.web.client.HttpStatusCodeException;
+import org.springframework.web.client.RestTemplate;
+
+import com.bhge.inspire.common.exception.ErrorCodes;
+import com.bhge.inspire.common.exception.SpirException;
+
+public class RestConnector {
+
+    private RestTemplate restTemplate;
+    private static Logger logger = LoggerFactory.getLogger(RestConnector.class);
+
+    public RestConnector() {
+        
+        //old 
+        
+//      List<HttpMessageConverter<?>> messageConverters = new ArrayList<HttpMessageConverter<?>>();
+//      MappingJackson2HttpMessageConverter converter = new MappingJackson2HttpMessageConverter();
+//      converter.setSupportedMediaTypes(Collections.singletonList(MediaType.ALL));
+//      messageConverters.add(converter);
+//
+//      this.restTemplate = new RestTemplate();
+//      SimpleClientHttpRequestFactory clientHttpRequestFactory = new SimpleClientHttpRequestFactory();
+//      clientHttpRequestFactory.setConnectTimeout(120000);//Changed from 30000 to 1200000(2 min) to resolve time out exception
+//      clientHttpRequestFactory.setReadTimeout(120000);//Changed from 30000 to 1200000(2 min) to resolve time out exception
+//      clientHttpRequestFactory.setBufferRequestBody(false);
+//      
+//      this.restTemplate.setRequestFactory(clientHttpRequestFactory);
+//      this.restTemplate.setMessageConverters(messageConverters);
+        
+        //new 
+        this.restTemplate = new RestTemplate();
+
+        SimpleClientHttpRequestFactory clientHttpRequestFactory = new SimpleClientHttpRequestFactory();
+        clientHttpRequestFactory.setConnectTimeout(120000);
+        clientHttpRequestFactory.setReadTimeout(120000);
+        clientHttpRequestFactory.setBufferRequestBody(true); // safer for multipart
+
+        this.restTemplate.setRequestFactory(clientHttpRequestFactory);
     }
-});
-String boundary = "----WebKitFormBoundary" + System.currentTimeMillis();
-headers.add(HttpHeaders.CONTENT_TYPE, "multipart/form-data; boundary=" + boundary);
+    
+    //Unused code - Can be removed later
+    /*public RestConnector(String proxy, int port) {
+
+        List<HttpMessageConverter<?>> messageConverters = new ArrayList<HttpMessageConverter<?>>();
+        MappingJackson2HttpMessageConverter converter = new MappingJackson2HttpMessageConverter();
+        converter.setSupportedMediaTypes(Collections.singletonList(MediaType.ALL));
+        messageConverters.add(converter);
+
+        this.restTemplate = new RestTemplate();
+        SimpleClientHttpRequestFactory clientHttpRequestFactory = new SimpleClientHttpRequestFactory();
+        clientHttpRequestFactory.setConnectTimeout(30000);
+        clientHttpRequestFactory.setReadTimeout(30000);
+        clientHttpRequestFactory.setBufferRequestBody(false);
+        Proxy proxyObj = new Proxy(Type.HTTP, new InetSocketAddress(
+                proxy,port));
+        clientHttpRequestFactory.setProxy(proxyObj);
+        this.restTemplate.setRequestFactory(clientHttpRequestFactory);
+        this.restTemplate.setMessageConverters(messageConverters);
+    }*/
+
+    public <T, T1> T connect(String url, HttpMethod method, HttpHeaders headers, T1 request, Class<T> responseClass)throws SpirException
+    {
+        ResponseEntity<T> responseEntity = null;
+        int failureCounter = 0;
+        int prevCounterValue=0;
+        while (failureCounter < 1) {
+            try {
+                HttpEntity<T1> httpEntity = new HttpEntity<T1>(request, headers);
+                URI uri = new URI(url);
+                responseEntity = getRestTemplate().exchange(uri, method, httpEntity, responseClass);
+
+            } catch (Exception e) {
+                logger.error("Error in Oracle connect : " + e.getMessage());
+                e.printStackTrace();
+                failureCounter++;
+            }
+            if (prevCounterValue==failureCounter) {
+                break;
+            }
+            prevCounterValue=failureCounter;
+        }
+        if (failureCounter == 1) {          
+            throw new SpirException(ErrorCodes.ERR_C003, "Error while connecting to REST Service.");
+        }
+        
+        return responseEntity!=null?responseEntity.getBody():null;
+    }
+
+    public RestTemplate getRestTemplate() {
+        return restTemplate;
+    }
+
+    public void setRestTemplate(RestTemplate restTemplate) {
+        this.restTemplate = restTemplate;
+    }
+    
+    public <T, T1> T connect(URI uri, HttpMethod method,  HttpHeaders headers,T1 request, Class<T> responseClass)
+            throws SpirException{
+        ResponseEntity<T> responseEntity =null;
+        try{
+        HttpEntity<T1> httpEntity = new HttpEntity<T1>(request, headers);
+        responseEntity = getRestTemplate().exchange(uri, method, httpEntity, responseClass);
+        }
+        catch(Exception e) {
+            logger.error("Error in Oracle connect 2: " + e.getMessage());
+            throw new SpirException(ErrorCodes.ERR_C003, "Error while connecting to REST Service.");
+        }
+        return responseEntity!=null?responseEntity.getBody():null;
+    }
+    
+    /* Added for Creating DM Oppty */
+    public <T, T1> T connectForCreateDMOppty(String url, HttpMethod method, HttpHeaders headers, T1 request,
+            Class<T> responseClass) throws SpirException {
+        ResponseEntity<T> responseEntity = null;
+        String errorMessage = null;
+        try {
+            HttpEntity<T1> httpEntity = new HttpEntity<T1>(request, headers);
+            responseEntity = getRestTemplate().exchange(url, method, httpEntity, responseClass);
+        } catch (HttpStatusCodeException e) {
+            errorMessage = e.getResponseBodyAsString();
+            throw new SpirException(ErrorCodes.ERR_G005, errorMessage);
+        }
+        return responseEntity != null ? responseEntity.getBody() : null;
+    }
+
+}
