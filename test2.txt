@@ -1,0 +1,282 @@
+package com.bakerhughes.ruleapp.service.impl;
+
+import com.bakerhughes.ruleapp.dto.BulkUploadFormColumn;
+import com.bakerhughes.ruleapp.entity.LookUpTableEntity;
+import com.bakerhughes.ruleapp.entity.RuleAppTableVersionEntity;
+import com.bakerhughes.ruleapp.exception.RuleAppServiceException;
+import com.bakerhughes.ruleapp.repository.LookUpTableRepository;
+import com.bakerhughes.ruleapp.repository.RuleAppTableVersionRepository;
+import com.bakerhughes.ruleapp.repository.RuleappHistoricalDataRepository;
+import com.bakerhughes.ruleapp.service.DynamicTableService;
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.apache.poi.ss.usermodel.*;
+import org.apache.poi.xssf.usermodel.XSSFWorkbook;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.*;
+import org.springframework.web.multipart.MultipartFile;
+
+import java.io.*;
+import java.time.LocalDateTime;
+import java.util.*;
+
+import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.Mockito.*;
+
+@ExtendWith(MockitoExtension.class)
+class ExcelUploadServiceImplTest {
+
+    @InjectMocks
+    private ExcelUploadServiceImpl service;
+
+    @Mock private LookUpTableRepository lookUpTableRepository;
+    @Mock private RuleAppTableVersionRepository ruleAppTableVersionRepository;
+    @Mock private RuleappHistoricalDataRepository ruleappHistoricalDataRepository;
+    @Mock private DynamicTableService dynamicTableService;
+    @Mock private ObjectMapper objectMapper;
+    @Mock private MultipartFile multipartFile;
+
+    private LookUpTableEntity table;
+
+    @BeforeEach
+    void setUp() {
+        table = new LookUpTableEntity();
+        table.setTableName("test_table");
+        table.setKeyColumns("id");
+        table.setRecordType("normal");
+        table.setUploadableByGroups("[\"group1\"]");
+        table.setBulkUploadForm("[{\"excelColumnName\":\"id\",\"columnName\":\"id\",\"isRequired\":true,\"castTo\":\"int\"}]");
+    }
+
+    private InputStream createExcel(String... headersAndValues) throws IOException {
+        Workbook workbook = new XSSFWorkbook();
+        Sheet sheet = workbook.createSheet();
+        Row header = sheet.createRow(0);
+        Row row = sheet.createRow(1);
+        for (int i = 0; i < headersAndValues.length; i += 2) {
+            header.createCell(i / 2).setCellValue(headersAndValues[i]);
+            row.createCell(i / 2).setCellValue(headersAndValues[i + 1]);
+        }
+        ByteArrayOutputStream bos = new ByteArrayOutputStream();
+        workbook.write(bos);
+        workbook.close();
+        return new ByteArrayInputStream(bos.toByteArray());
+    }
+
+    // ✅ Happy path — covers all internal logic: parse JSON, versioning, casting, DB saves
+    @Test
+    void testUploadExcelFile_Success() throws Exception {
+        when(lookUpTableRepository.findByTableName("test_table"))
+                .thenReturn(Optional.of(table));
+
+        when(objectMapper.readValue(eq("[\"group1\"]"),
+                ArgumentMatchers.<TypeReference<List<String>>>any()))
+                .thenReturn(List.of("group1"));
+
+        BulkUploadFormColumn formColumn = new BulkUploadFormColumn();
+        formColumn.setExcelColumnName("id");
+        formColumn.setColumnName("id");
+        formColumn.setIsRequired(true);
+        formColumn.setCastTo("int");
+        formColumn.setRegex(null);
+        when(objectMapper.readValue(eq(table.getBulkUploadForm()),
+                ArgumentMatchers.<TypeReference<List<BulkUploadFormColumn>>>any()))
+                .thenReturn(List.of(formColumn));
+
+        when(multipartFile.getInputStream()).thenReturn(createExcel("id", "123"));
+        when(ruleAppTableVersionRepository.findFirstByTableIdAndValidityEndIsNullOrderByValidityStartDesc("test_table"))
+                .thenReturn(Optional.empty());
+
+        Map<String, Object> result =
+                service.uploadExcelFile("test_table", List.of("group1"), multipartFile, "user1");
+
+        assertEquals("Excel file processed successfully", result.get("message"));
+        verify(dynamicTableService, times(1))
+                .truncateAndReloadTable(anyString(), anyList(), anyList());
+        verify(ruleappHistoricalDataRepository, times(1)).save(any());
+    }
+
+    // ❌ No table found
+    @Test
+    void testUploadExcelFile_TableNotFound() {
+        when(lookUpTableRepository.findByTableName("missing"))
+                .thenReturn(Optional.empty());
+
+        RuleAppServiceException ex = assertThrows(RuleAppServiceException.class,
+                () -> service.uploadExcelFile("missing", List.of("group1"), multipartFile, "user"));
+        assertTrue(ex.getMessage().contains("not found"));
+    }
+
+    // ❌ No permission (group mismatch)
+    @Test
+    void testUploadExcelFile_NoPermission() throws Exception {
+        when(lookUpTableRepository.findByTableName("test_table"))
+                .thenReturn(Optional.of(table));
+        when(objectMapper.readValue(anyString(),
+                ArgumentMatchers.<TypeReference<List<String>>>any()))
+                .thenReturn(List.of("anotherGroup"));
+
+        RuleAppServiceException ex = assertThrows(RuleAppServiceException.class,
+                () -> service.uploadExcelFile("test_table", List.of("group1"), multipartFile, "user"));
+        assertTrue(ex.getMessage().contains("not allowed"));
+    }
+
+    // ❌ Bulk upload form parse error (invalid JSON)
+    @Test
+    void testUploadExcelFile_InvalidBulkUploadForm() throws Exception {
+        when(lookUpTableRepository.findByTableName("test_table"))
+                .thenReturn(Optional.of(table));
+
+        when(objectMapper.readValue(eq("[\"group1\"]"),
+                ArgumentMatchers.<TypeReference<List<String>>>any()))
+                .thenReturn(List.of("group1"));
+
+        when(objectMapper.readValue(eq(table.getBulkUploadForm()),
+                ArgumentMatchers.<TypeReference<List<BulkUploadFormColumn>>>any()))
+                .thenThrow(new RuntimeException("bad json"));
+
+        assertThrows(RuleAppServiceException.class,
+                () -> service.uploadExcelFile("test_table", List.of("group1"), multipartFile, "user"));
+    }
+
+    // ❌ Missing column header in Excel → covers header validation logic
+    @Test
+    void testUploadExcelFile_MissingColumnHeader() throws Exception {
+        when(lookUpTableRepository.findByTableName("test_table"))
+                .thenReturn(Optional.of(table));
+        when(objectMapper.readValue(eq("[\"group1\"]"),
+                ArgumentMatchers.<TypeReference<List<String>>>any()))
+                .thenReturn(List.of("group1"));
+        BulkUploadFormColumn form = new BulkUploadFormColumn();
+        form.setExcelColumnName("id");
+        form.setColumnName("id");
+        form.setIsRequired(true);
+        form.setCastTo("int");
+        when(objectMapper.readValue(eq(table.getBulkUploadForm()),
+                ArgumentMatchers.<TypeReference<List<BulkUploadFormColumn>>>any()))
+                .thenReturn(List.of(form));
+
+        when(multipartFile.getInputStream()).thenReturn(createExcel("wrong", "1"));
+
+        RuleAppServiceException ex = assertThrows(RuleAppServiceException.class,
+                () -> service.uploadExcelFile("test_table", List.of("group1"), multipartFile, "user"));
+        assertTrue(ex.getMessage().contains("Missing columns"));
+    }
+
+    // ❌ Duplicate key → covers duplicate detection logic
+    @Test
+    void testUploadExcelFile_DuplicateKey() throws Exception {
+        when(lookUpTableRepository.findByTableName("test_table"))
+                .thenReturn(Optional.of(table));
+        when(objectMapper.readValue(eq("[\"group1\"]"),
+                ArgumentMatchers.<TypeReference<List<String>>>any()))
+                .thenReturn(List.of("group1"));
+        BulkUploadFormColumn form = new BulkUploadFormColumn();
+        form.setExcelColumnName("id");
+        form.setColumnName("id");
+        form.setIsRequired(true);
+        form.setCastTo("int");
+        when(objectMapper.readValue(eq(table.getBulkUploadForm()),
+                ArgumentMatchers.<TypeReference<List<BulkUploadFormColumn>>>any()))
+                .thenReturn(List.of(form));
+
+        Workbook wb = new XSSFWorkbook();
+        Sheet s = wb.createSheet();
+        Row h = s.createRow(0);
+        h.createCell(0).setCellValue("id");
+        s.createRow(1).createCell(0).setCellValue("1");
+        s.createRow(2).createCell(0).setCellValue("1");
+        ByteArrayOutputStream bos = new ByteArrayOutputStream();
+        wb.write(bos);
+        wb.close();
+        when(multipartFile.getInputStream()).thenReturn(new ByteArrayInputStream(bos.toByteArray()));
+
+        RuleAppServiceException ex = assertThrows(RuleAppServiceException.class,
+                () -> service.uploadExcelFile("test_table", List.of("group1"), multipartFile, "user"));
+        assertTrue(ex.getMessage().contains("Duplicate key"));
+    }
+
+    // ❌ Casting error (invalid number)
+    @Test
+    void testUploadExcelFile_CastingError() throws Exception {
+        when(lookUpTableRepository.findByTableName("test_table"))
+                .thenReturn(Optional.of(table));
+        when(objectMapper.readValue(eq("[\"group1\"]"),
+                ArgumentMatchers.<TypeReference<List<String>>>any()))
+                .thenReturn(List.of("group1"));
+        BulkUploadFormColumn form = new BulkUploadFormColumn();
+        form.setExcelColumnName("id");
+        form.setColumnName("id");
+        form.setIsRequired(true);
+        form.setCastTo("int");
+        when(objectMapper.readValue(eq(table.getBulkUploadForm()),
+                ArgumentMatchers.<TypeReference<List<BulkUploadFormColumn>>>any()))
+                .thenReturn(List.of(form));
+
+        when(multipartFile.getInputStream()).thenReturn(createExcel("id", "abc"));
+
+        RuleAppServiceException ex = assertThrows(RuleAppServiceException.class,
+                () -> service.uploadExcelFile("test_table", List.of("group1"), multipartFile, "user"));
+        assertTrue(ex.getMessage().contains("Error casting value"));
+    }
+
+    // ❌ Historical data serialization failure
+    @Test
+    void testUploadExcelFile_HistoricalDataFailure() throws Exception {
+        when(lookUpTableRepository.findByTableName("test_table"))
+                .thenReturn(Optional.of(table));
+        when(objectMapper.readValue(eq("[\"group1\"]"),
+                ArgumentMatchers.<TypeReference<List<String>>>any()))
+                .thenReturn(List.of("group1"));
+        BulkUploadFormColumn form = new BulkUploadFormColumn();
+        form.setExcelColumnName("id");
+        form.setColumnName("id");
+        form.setIsRequired(true);
+        form.setCastTo("int");
+        when(objectMapper.readValue(eq(table.getBulkUploadForm()),
+                ArgumentMatchers.<TypeReference<List<BulkUploadFormColumn>>>any()))
+                .thenReturn(List.of(form));
+        when(multipartFile.getInputStream()).thenReturn(createExcel("id", "123"));
+        when(ruleAppTableVersionRepository.findFirstByTableIdAndValidityEndIsNullOrderByValidityStartDesc(anyString()))
+                .thenReturn(Optional.empty());
+        doThrow(new RuntimeException("json error")).when(objectMapper).writeValueAsString(any());
+
+        assertThrows(RuleAppServiceException.class,
+                () -> service.uploadExcelFile("test_table", List.of("group1"), multipartFile, "user"));
+    }
+
+    // ✅ Version update branch where old version exists
+    @Test
+    void testUploadExcelFile_WithExistingVersion() throws Exception {
+        when(lookUpTableRepository.findByTableName("test_table"))
+                .thenReturn(Optional.of(table));
+        when(objectMapper.readValue(eq("[\"group1\"]"),
+                ArgumentMatchers.<TypeReference<List<String>>>any()))
+                .thenReturn(List.of("group1"));
+        BulkUploadFormColumn form = new BulkUploadFormColumn();
+        form.setExcelColumnName("id");
+        form.setColumnName("id");
+        form.setIsRequired(true);
+        form.setCastTo("int");
+        when(objectMapper.readValue(eq(table.getBulkUploadForm()),
+                ArgumentMatchers.<TypeReference<List<BulkUploadFormColumn>>>any()))
+                .thenReturn(List.of(form));
+
+        when(multipartFile.getInputStream()).thenReturn(createExcel("id", "123"));
+
+        RuleAppTableVersionEntity entity = new RuleAppTableVersionEntity();
+        entity.setVersion(1);
+        entity.setSubVersion(0);
+        entity.setCreatedDate(LocalDateTime.now());
+        when(ruleAppTableVersionRepository.findFirstByTableIdAndValidityEndIsNullOrderByValidityStartDesc(anyString()))
+                .thenReturn(Optional.of(entity));
+
+        Map<String, Object> result =
+                service.uploadExcelFile("test_table", List.of("group1"), multipartFile, "user1");
+
+        assertEquals("Excel file processed successfully", result.get("message"));
+        verify(ruleAppTableVersionRepository, atLeastOnce()).save(any());
+    }
+}
