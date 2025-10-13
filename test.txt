@@ -276,4 +276,84 @@ class ExcelUploadServiceImplTest {
         assertThrows(RuleAppServiceException.class,
                 () -> service.uploadExcelFile("demo_table", List.of("groupA"), file, "tester"));
     }
+
+@Test
+void testUploadExcelFile_InvalidExcelFormat() throws Exception {
+    when(lookUpTableRepository.findByTableName("test_table")).thenReturn(Optional.of(lookUpTable));
+    when(objectMapper.readValue(eq("[\"group1\"]"), ArgumentMatchers.<TypeReference<List<String>>>any()))
+            .thenReturn(List.of("group1"));
+    when(objectMapper.readValue(eq(lookUpTable.getBulkUploadForm()), ArgumentMatchers.<TypeReference<List<BulkUploadFormColumn>>>any()))
+            .thenReturn(List.of(new BulkUploadFormColumn("id", "id", "int", "id", true, null)));
+    when(multipartFile.getInputStream()).thenThrow(new IOException("bad file"));
+
+    RuleAppServiceException ex = assertThrows(RuleAppServiceException.class,
+            () -> excelUploadService.uploadExcelFile("test_table", List.of("group1"), multipartFile, "user"));
+    assertEquals(HttpStatus.BAD_REQUEST, ex.getHttpStatus());
+}
+
+@Test
+void testCastValue_AllSupportedTypes() throws Exception {
+    assertEquals(10, excelUploadService.castValueForTest("10", "int"));
+    assertEquals(10L, excelUploadService.castValueForTest("10", "long"));
+    assertEquals(10.5d, excelUploadService.castValueForTest("10.5", "double"));
+    assertEquals(true, excelUploadService.castValueForTest("true", "boolean"));
+    LocalDate d = (LocalDate) excelUploadService.castValueForTest("2025-01-01", "date");
+    assertEquals(2025, d.getYear());
+    assertEquals("abc", excelUploadService.castValueForTest("abc", "string"));
+}
+
+@Test
+void testValidateAndExtractExcelData_WithRegexAndEmptyCell() throws Exception {
+    BulkUploadFormColumn col = new BulkUploadFormColumn("email", "email", "string", "email", true, "^[a-z]+@test\\.com$");
+    Workbook wb = new XSSFWorkbook();
+    Sheet sheet = wb.createSheet();
+    Row header = sheet.createRow(0);
+    header.createCell(0).setCellValue("email");
+    Row row1 = sheet.createRow(1);
+    row1.createCell(0).setCellValue("invalid@other.com"); // regex fail
+    ByteArrayOutputStream bos = new ByteArrayOutputStream();
+    wb.write(bos);
+    wb.close();
+    when(multipartFile.getInputStream()).thenReturn(new ByteArrayInputStream(bos.toByteArray()));
+
+    RuleAppServiceException ex = assertThrows(RuleAppServiceException.class,
+            () -> excelUploadService.validateAndExtractExcelDataForTest(multipartFile, List.of(col), List.of("email")));
+    assertTrue(ex.getMessage().contains("Validation failed"));
+}
+
+@Test
+void testValidateAndExtractExcelData_EmptySheet() throws Exception {
+    BulkUploadFormColumn col = new BulkUploadFormColumn("id", "id", "int", "id", true, null);
+    Workbook wb = new XSSFWorkbook();
+    wb.createSheet(); // no rows
+    ByteArrayOutputStream bos = new ByteArrayOutputStream();
+    wb.write(bos);
+    wb.close();
+    when(multipartFile.getInputStream()).thenReturn(new ByteArrayInputStream(bos.toByteArray()));
+
+    RuleAppServiceException ex = assertThrows(RuleAppServiceException.class,
+            () -> excelUploadService.validateAndExtractExcelDataForTest(multipartFile, List.of(col), List.of("id")));
+    assertTrue(ex.getMessage().contains("Invalid or empty Excel file"));
+}
+
+@Test
+void testUpdateTableVersion_SubVersionIncrement() {
+    RuleAppTableVersionEntity entity = new RuleAppTableVersionEntity();
+    entity.setVersion(1);
+    entity.setSubVersion(2);
+    entity.setCreatedDate(LocalDateTime.now());
+    when(ruleAppTableVersionRepository.findFirstByTableIdAndValidityEndIsNullOrderByValidityStartDesc(anyString()))
+            .thenReturn(Optional.of(entity));
+
+    String version = excelUploadService.updateTableVersionForTest("table", "user");
+    assertTrue(version.startsWith("1."));
+}
+
+@Test
+void testStoreHistoricalData_EmptyData() {
+    // Should not throw, but still record valid call
+    excelUploadService.storeHistoricalDataForTest("table", Collections.emptyList(), "1.0", "user");
+    verify(ruleappHistoricalDataRepository, never()).save(any());
+}
+
 }
