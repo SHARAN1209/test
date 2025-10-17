@@ -1,86 +1,182 @@
-package com.bakerhughes.ruleapp.mapper;
+package com.bakerhughes.ruleapp.service.impl;
 
-import static org.junit.jupiter.api.Assertions.*;
-
-import java.time.LocalDateTime;
-import java.util.Arrays;
-import java.util.Collections;
+import java.sql.Connection;
+import java.sql.DatabaseMetaData;
+import java.sql.ResultSet;
+import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.stream.Collectors;
 
-import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Test;
+import javax.sql.DataSource;
 
-import com.bakerhughes.ruleapp.dto.LookUpTableResponse;
-import com.bakerhughes.ruleapp.dto.RuleAppTableVersionResponse;
-import com.bakerhughes.ruleapp.entity.LookUpTableEntity;
-import com.bakerhughes.ruleapp.entity.RuleAppTableVersionEntity;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.http.HttpStatus;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+import org.springframework.util.StringUtils;
 
-class RuleAppServiceMapperTest {
+import com.bakerhughes.ruleapp.dto.BulkUploadFormColumn;
+import com.bakerhughes.ruleapp.exception.ErrorCode;
+import com.bakerhughes.ruleapp.exception.RuleAppServiceException;
+import com.bakerhughes.ruleapp.service.DynamicTableService;
 
-    private RuleAppServiceMapper mapper;
+@Service
+public class DynamicTableServiceImpl implements DynamicTableService {
 
-    @BeforeEach
-    void setUp() {
-        mapper = new RuleAppServiceMapper();
+    private static final Logger log = LoggerFactory.getLogger(DynamicTableServiceImpl.class);
+
+    @Autowired
+    private JdbcTemplate jdbcTemplate;
+
+    @Autowired
+    private DataSource dataSource;
+
+    private static final String IDENTIFIER_REGEX = "^[A-Za-z][A-Za-z0-9_]*$";
+
+    @Transactional
+    public void truncateAndReloadTable(String tableName, List<Map<String, Object>> data,
+            List<BulkUploadFormColumn> columns) {
+
+        try (Connection conn = dataSource.getConnection()) {
+            // Validate and get quoting char
+            String quote = getIdentifierQuoteString(conn.getMetaData());
+
+            // ensure table exists
+            if (!StringUtils.hasText(tableName) || !isValidIdentifier(tableName)) {
+                throw new RuleAppServiceException(ErrorCode.TABLE_RELOAD_FAILURE,
+                        "Invalid table name: " + tableName, null, null, HttpStatus.BAD_REQUEST);
+            }
+            if (!tableExists(conn.getMetaData(), tableName)) {
+                throw new RuleAppServiceException(ErrorCode.TABLE_RELOAD_FAILURE,
+                        "Table not found: " + tableName, null, null, HttpStatus.BAD_REQUEST);
+            }
+
+            // Resolve columns: intersect requested and actual columns (preserves order of requested)
+            List<String> allColumns = resolveAllColumnsFromMetadata(conn.getMetaData(), tableName, columns);
+
+            if (allColumns.isEmpty()) {
+                throw new RuleAppServiceException(ErrorCode.TABLE_RELOAD_FAILURE,
+                        "No valid columns to insert for table: " + tableName, null, null, HttpStatus.BAD_REQUEST);
+            }
+
+            // Build safe SQL using quoted identifiers
+            String quotedTable = quoteIdentifier(tableName, quote);
+            String insertSql = buildSafeInsertSql(quotedTable, allColumns, quote);
+
+            // Truncate - safe because table name was validated and exists and we used quoting
+            jdbcTemplate.execute("TRUNCATE TABLE " + quotedTable);
+
+            List<Object[]> batchArgs = data.stream()
+                    .map(row -> mapRowValues(row, allColumns))
+                    .toList();
+
+            jdbcTemplate.batchUpdate(insertSql, batchArgs);
+
+            log.info("Inserted {} rows into {}", data.size(), tableName);
+
+        } catch (RuleAppServiceException re) {
+            throw re; // rethrow our controlled exceptions
+        } catch (Exception e) {
+            log.error("Error in truncateAndReloadTable for {}: {}", tableName, e.getMessage(), e);
+            throw new RuleAppServiceException(ErrorCode.TABLE_RELOAD_FAILURE,
+                    String.format("Failed to truncateAndReloadTable data for %s", tableName), null, null,
+                    HttpStatus.INTERNAL_SERVER_ERROR);
+        }
     }
 
-    @Test
-    void testMapTableInformationsToResponse_withValidEntities() {
-        LookUpTableEntity entity = new LookUpTableEntity();
-        entity.setTableName("TestTable");
-        entity.setDownloadableByGroups(Arrays.asList("group1", "group2"));
-        entity.setUploadableByGroups(Arrays.asList("group3"));
-        entity.setLookupDescription("desc");
-        entity.setLookupCategories(Arrays.asList("cat1", "cat2"));
-        entity.setNotes("some notes");
+    private List<String> resolveAllColumnsFromMetadata(DatabaseMetaData metaData, String tableName,
+            List<BulkUploadFormColumn> columns) {
+        // user-sent validated list (lowercased) but we'll only keep those present in DB
+        List<String> requested = columns == null ? List.of()
+                : columns.stream().map(BulkUploadFormColumn::getColumnName).filter(this::isValidIdentifier)
+                        .map(String::toLowerCase).toList();
 
-        List<LookUpTableResponse> responses = mapper.mapTableInformationsToResponse(Arrays.asList(entity));
+        List<String> required = getNonNullableColumnsFromMeta(metaData, tableName).stream()
+                .map(String::toLowerCase).toList();
 
-        assertNotNull(responses);
-        assertEquals(1, responses.size());
+        // Build ordered set: requested first, then required if missing
+        Set<String> all = new LinkedHashSet<>(requested);
+        all.addAll(required);
 
-        LookUpTableResponse response = responses.get(0);
-        assertEquals("TestTable", response.getTableId());
-        assertEquals(Arrays.asList("group1", "group2"), response.getDownloadableByGroups());
-        assertEquals(Arrays.asList("group3"), response.getUploadableByGroups());
-        assertEquals("desc", response.getLookupDescription());
-        assertEquals(Arrays.asList("cat1", "cat2"), response.getLookupCategories());
-        assertEquals("some notes", response.getNotes());
+        // Final: keep only columns that actually exist in the DB (case-insensitive)
+        List<String> existing = getAllColumnsFromMeta(metaData, tableName).stream()
+                .map(String::toLowerCase).toList();
+
+        return all.stream().filter(existing::contains).toList();
     }
 
-    @Test
-    void testMapTableInformationsToResponse_withEmptyList() {
-        List<LookUpTableResponse> responses = mapper.mapTableInformationsToResponse(Collections.emptyList());
-        assertNotNull(responses);
-        assertTrue(responses.isEmpty());
+    private Object[] mapRowValues(Map<String, Object> row, List<String> allColumns) {
+        return allColumns.stream().map(col -> row.getOrDefault(col, null)).toArray();
     }
 
-    @Test
-    void testMapTableVersionsToResponse_withValidEntities() {
-        RuleAppTableVersionEntity entity = new RuleAppTableVersionEntity();
-        entity.setTableId("Table1");
-        entity.setVersion(1);
-        entity.setSubVersion(2);
-        entity.setValidityStart(LocalDateTime.of(2024, 1, 1, 0, 0));
-        entity.setValidityEnd(LocalDateTime.of(2025, 1, 1, 0, 0));
-
-        List<RuleAppTableVersionResponse> responses = mapper.mapTableVersionsToResponse(Arrays.asList(entity));
-
-        assertNotNull(responses);
-        assertEquals(1, responses.size());
-
-        RuleAppTableVersionResponse response = responses.get(0);
-        assertEquals("Table1", response.getTableId());
-        assertEquals(1, response.getVersion());
-        assertEquals(2, response.getSubVersion());
-        assertEquals(LocalDateTime.of(2024, 1, 1, 0, 0), response.getValidityStart());
-        assertEquals(LocalDateTime.of(2025, 1, 1, 0, 0), response.getValidityEnd());
+    private String buildSafeInsertSql(String quotedTable, List<String> columns, String quote) {
+        // Quote each column using DB-specific quote
+        String colList = columns.stream().map(c -> quoteIdentifier(c, quote)).collect(Collectors.joining(", "));
+        String placeholders = columns.stream().map(c -> "?").collect(Collectors.joining(", "));
+        return String.format("INSERT INTO %s (%s) VALUES (%s)", quotedTable, colList, placeholders);
     }
 
-    @Test
-    void testMapTableVersionsToResponse_withEmptyList() {
-        List<RuleAppTableVersionResponse> responses = mapper.mapTableVersionsToResponse(Collections.emptyList());
-        assertNotNull(responses);
-        assertTrue(responses.isEmpty());
+    private boolean isValidIdentifier(String name) {
+        return StringUtils.hasText(name) && name.matches(IDENTIFIER_REGEX);
+    }
+
+    private String quoteIdentifier(String identifier, String quote) {
+        if (quote == null || quote.trim().isEmpty()) {
+            // fallback to double-quote if DB didn't return anything
+            quote = "\"";
+        }
+        return quote + identifier + quote;
+    }
+
+    private String getIdentifierQuoteString(DatabaseMetaData metaData) {
+        try {
+            String q = metaData.getIdentifierQuoteString();
+            return q == null ? "\"" : q;
+        } catch (Exception e) {
+            log.warn("Could not determine identifier quote string from metadata, defaulting to double quotes", e);
+            return "\"";
+        }
+    }
+
+    private boolean tableExists(DatabaseMetaData metaData, String tableName) {
+        try (ResultSet rs = metaData.getTables(null, null, tableName, new String[] { "TABLE" })) {
+            return rs.next();
+        } catch (Exception e) {
+            log.error("Error checking table existence for {}: {}", tableName, e.getMessage());
+            return false;
+        }
+    }
+
+    private List<String> getAllColumnsFromMeta(DatabaseMetaData metaData, String tableName) {
+        List<String> cols = new ArrayList<>();
+        try (ResultSet rs = metaData.getColumns(null, null, tableName, null)) {
+            while (rs.next()) {
+                cols.add(rs.getString("COLUMN_NAME"));
+            }
+        } catch (Exception e) {
+            log.error("Error reading columns for {}: {}", tableName, e.getMessage());
+        }
+        return cols;
+    }
+
+    private List<String> getNonNullableColumnsFromMeta(DatabaseMetaData metaData, String tableName) {
+        List<String> cols = new ArrayList<>();
+        try (ResultSet rs = metaData.getColumns(null, null, tableName, null)) {
+            while (rs.next()) {
+                int nullable = rs.getInt("NULLABLE"); // DatabaseMetaData.columnNoNulls/columnNullable
+                if (nullable == DatabaseMetaData.columnNoNulls) {
+                    cols.add(rs.getString("COLUMN_NAME"));
+                }
+            }
+        } catch (Exception e) {
+            log.error("Error reading non-nullable columns for {}: {}", tableName, e.getMessage());
+        }
+        return cols;
     }
 }
