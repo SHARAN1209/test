@@ -1,162 +1,21 @@
-package com.bakerhughes.ruleapp.service.impl;
+@Test
+void testTruncateAndReloadTable_MetadataFailure_ThrowsException() throws Exception {
+    // given metadata throws when fetching columns
+    when(metaData.getColumns(any(), any(), any(), any())).thenThrow(new RuntimeException("metadata error"));
 
-import static org.junit.jupiter.api.Assertions.*;
-import static org.mockito.ArgumentMatchers.*;
-import static org.mockito.Mockito.*;
+    BulkUploadFormColumn col = new BulkUploadFormColumn();
+    col.setColumnName("id");
+    List<Map<String, Object>> data = List.of(Map.of("id", 1));
 
-import java.sql.Connection;
-import java.sql.DatabaseMetaData;
-import java.sql.ResultSet;
-import java.util.List;
-import java.util.Map;
+    // when / then
+    RuleAppServiceException ex = assertThrows(RuleAppServiceException.class,
+            () -> dynamicTableService.truncateAndReloadTable("my_table", data, List.of(col)));
 
-import javax.sql.DataSource;
-
-import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Test;
-import org.mockito.*;
-import org.springframework.http.HttpStatus;
-import org.springframework.jdbc.core.JdbcTemplate;
-
-import com.bakerhughes.ruleapp.dto.BulkUploadFormColumn;
-import com.bakerhughes.ruleapp.exception.ErrorCode;
-import com.bakerhughes.ruleapp.exception.RuleAppServiceException;
-
-class DynamicTableServiceImplTest {
-
-    @InjectMocks
-    private DynamicTableServiceImpl dynamicTableService;
-
-    @Mock
-    private JdbcTemplate jdbcTemplate;
-
-    @Mock
-    private DataSource dataSource;
-
-    @Mock
-    private Connection connection;
-
-    @Mock
-    private DatabaseMetaData metaData;
-
-    @Mock
-    private ResultSet tableRs;
-
-    @Mock
-    private ResultSet columnRs;
-
-    @Captor
-    private ArgumentCaptor<String> sqlCaptor;
-
-    @BeforeEach
-    void setup() throws Exception {
-        MockitoAnnotations.openMocks(this);
-        when(dataSource.getConnection()).thenReturn(connection);
-        when(connection.getMetaData()).thenReturn(metaData);
-        when(metaData.getIdentifierQuoteString()).thenReturn("\"");
-
-        // Mock that table exists
-        when(metaData.getTables(any(), any(), eq("my_table"), any()))
-                .thenReturn(tableRs);
-        when(tableRs.next()).thenReturn(true);
-
-        // Mock that columns exist
-        when(metaData.getColumns(any(), any(), eq("my_table"), any()))
-                .thenReturn(columnRs);
-        when(columnRs.next()).thenReturn(true, true, false);
-        when(columnRs.getString("COLUMN_NAME")).thenReturn("id", "name");
-        when(columnRs.getInt("NULLABLE")).thenReturn(DatabaseMetaData.columnNoNulls);
-    }
-
-    @Test
-    void testTruncateAndReloadTable_Success() throws Exception {
-        // given
-        BulkUploadFormColumn c1 = new BulkUploadFormColumn();
-        c1.setColumnName("id");
-        BulkUploadFormColumn c2 = new BulkUploadFormColumn();
-        c2.setColumnName("name");
-
-        List<Map<String, Object>> data = List.of(
-                Map.of("id", 1, "name", "Alice"),
-                Map.of("id", 2, "name", "Bob"));
-
-        // when
-        dynamicTableService.truncateAndReloadTable("my_table", data, List.of(c1, c2));
-
-        // then
-        verify(jdbcTemplate).execute(sqlCaptor.capture());
-        String executedSql = sqlCaptor.getValue();
-        assertTrue(executedSql.contains("TRUNCATE TABLE"));
-        assertTrue(executedSql.contains("my_table"));
-
-        verify(jdbcTemplate).batchUpdate(anyString(), anyList());
-        verifyNoMoreInteractions(jdbcTemplate);
-    }
-
-    @Test
-    void testTruncateAndReloadTable_InvalidTableName_ThrowsException() {
-        // given invalid table name
-        String invalidTable = "my_table; DROP TABLE users";
-        List<Map<String, Object>> data = List.of(Map.of("id", 1));
-        List<BulkUploadFormColumn> cols = List.of();
-
-        // when / then
-        RuleAppServiceException ex = assertThrows(RuleAppServiceException.class,
-                () -> dynamicTableService.truncateAndReloadTable(invalidTable, data, cols));
-
-        assertEquals(ErrorCode.TABLE_RELOAD_FAILURE, ex.getErrorCode());
-        assertEquals(HttpStatus.BAD_REQUEST, ex.getStatus());
-    }
-
-    @Test
-    void testTruncateAndReloadTable_TableNotFound_ThrowsException() throws Exception {
-        // given
-        when(tableRs.next()).thenReturn(false); // table does not exist
-
-        List<Map<String, Object>> data = List.of(Map.of("id", 1));
-        List<BulkUploadFormColumn> cols = List.of();
-
-        // when / then
-        RuleAppServiceException ex = assertThrows(RuleAppServiceException.class,
-                () -> dynamicTableService.truncateAndReloadTable("unknown_table", data, cols));
-
-        assertEquals(HttpStatus.BAD_REQUEST, ex.getStatus());
-        verify(jdbcTemplate, never()).execute(anyString());
-    }
-
-    @Test
-    void testTruncateAndReloadTable_NoValidColumns_ThrowsException() throws Exception {
-        // given: columns provided but none match metadata
-        when(metaData.getColumns(any(), any(), eq("my_table"), any())).thenReturn(columnRs);
-        when(columnRs.next()).thenReturn(false); // no columns
-
-        BulkUploadFormColumn col = new BulkUploadFormColumn();
-        col.setColumnName("fake_col");
-
-        List<Map<String, Object>> data = List.of(Map.of("fake_col", 1));
-
-        // when / then
-        RuleAppServiceException ex = assertThrows(RuleAppServiceException.class,
-                () -> dynamicTableService.truncateAndReloadTable("my_table", data, List.of(col)));
-
-        assertEquals(HttpStatus.BAD_REQUEST, ex.getStatus());
-        assertTrue(ex.getMessage().contains("No valid columns"));
-    }
-
-    @Test
-    void testTruncateAndReloadTable_MetadataFailure_ThrowsException() throws Exception {
-        // given metadata throws
-        when(metaData.getTables(any(), any(), any(), any())).thenThrow(new RuntimeException("metadata error"));
-
-        BulkUploadFormColumn col = new BulkUploadFormColumn();
-        col.setColumnName("id");
-        List<Map<String, Object>> data = List.of(Map.of("id", 1));
-
-        // when / then
-        RuleAppServiceException ex = assertThrows(RuleAppServiceException.class,
-                () -> dynamicTableService.truncateAndReloadTable("my_table", data, List.of(col)));
-
-        assertEquals(ErrorCode.TABLE_RELOAD_FAILURE, ex.getErrorCode());
-        assertEquals(HttpStatus.INTERNAL_SERVER_ERROR, ex.getStatus());
-    }
+    assertEquals(ErrorCode.TABLE_RELOAD_FAILURE, ex.getErrorCode());
+    assertEquals(HttpStatus.INTERNAL_SERVER_ERROR, ex.getStatus());
 }
+
+
+when(columnRs.next()).thenReturn(true, true, false);
+when(columnRs.getString("COLUMN_NAME")).thenReturn("id", "name");
+when(columnRs.getInt("NULLABLE")).thenReturn(DatabaseMetaData.columnNoNulls);
