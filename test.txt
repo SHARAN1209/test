@@ -1,15 +1,114 @@
-Connection mockConn = mock(Connection.class);
-DatabaseMetaData metaData = mock(DatabaseMetaData.class);
-ResultSet columnRs = mock(ResultSet.class);
-Statement stmt = mock(Statement.class);
+package com.bhge.inspire.spir.controller;
 
-when(dataSource.getConnection()).thenReturn(mockConn);
-when(mockConn.getMetaData()).thenReturn(metaData);
-when(metaData.getColumns(any(), any(), anyString(), any())).thenReturn(columnRs);
+import com.bhge.inspire.opa.pojo.response.LookUpTableResponse;
+import com.bhge.inspire.opa.pojo.response.RuleAppTableVersionResponse;
+import com.bhge.inspire.spir.config.security.JwtTokenUtil;
+import com.bhge.inspire.spir.constants.SpirConstants;
+import com.bhge.inspire.spir.service.RuleTableAccessService;
+import jakarta.servlet.http.HttpServletRequest;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.mockito.InjectMocks;
+import org.mockito.Mock;
+import org.mockito.MockitoAnnotations;
+import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
+import org.springframework.mock.web.MockHttpServletRequest;
+import org.springframework.mock.web.MockMultipartFile;
+import org.springframework.web.multipart.MultipartFile;
 
-when(columnRs.next()).thenReturn(true, true, false);
-when(columnRs.getString("COLUMN_NAME")).thenReturn("id", "name");
-when(columnRs.getInt("NULLABLE")).thenReturn(DatabaseMetaData.columnNoNulls, DatabaseMetaData.columnNullable);
+import java.util.*;
 
-when(mockConn.createStatement()).thenReturn(stmt);
-when(stmt.execute(anyString())).thenReturn(true);
+import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.ArgumentMatchers.*;
+import static org.mockito.Mockito.*;
+
+public class RuleappControllerTest {
+
+    @Mock
+    private RuleTableAccessService ruleTableAccessService;
+
+    @Mock
+    private JwtTokenUtil jwtTokenUtil;
+
+    @InjectMocks
+    private RuleappController ruleappController;
+
+    private HttpServletRequest mockRequest;
+    private static final String AUTH_HEADER = "Bearer test-token";
+
+    @BeforeEach
+    void setUp() {
+        MockitoAnnotations.openMocks(this);
+        MockHttpServletRequest request = new MockHttpServletRequest();
+        request.addHeader(SpirConstants.AUTHORIZATION, AUTH_HEADER);
+        this.mockRequest = request;
+
+        when(jwtTokenUtil.getJwtToken(AUTH_HEADER)).thenReturn("decodedToken");
+        when(jwtTokenUtil.getGroupsFromToken("decodedToken")).thenReturn(List.of("GROUP_A", "GROUP_B"));
+        when(jwtTokenUtil.getUsernameFromToken("decodedToken")).thenReturn("testUser");
+    }
+
+    @Test
+    void testGetAccessibleTables() {
+        List<LookUpTableResponse> mockResponse = List.of(new LookUpTableResponse());
+        when(ruleTableAccessService.getAllowedTablesByGroups(anyList())).thenReturn(mockResponse);
+
+        ResponseEntity<List<LookUpTableResponse>> response = ruleappController.getAccessibleTables(mockRequest);
+
+        assertEquals(200, response.getStatusCodeValue());
+        assertEquals(mockResponse, response.getBody());
+        verify(ruleTableAccessService, times(1)).getAllowedTablesByGroups(anyList());
+    }
+
+    @Test
+    void testGetTableVersions() {
+        String tableId = "table123";
+        boolean isAdmin = true;
+        List<RuleAppTableVersionResponse> mockVersions = List.of(new RuleAppTableVersionResponse());
+        when(ruleTableAccessService.getTableVersions(eq(tableId), eq(isAdmin), anyList()))
+                .thenReturn(mockVersions);
+
+        ResponseEntity<List<RuleAppTableVersionResponse>> response =
+                ruleappController.getTableVersions(mockRequest, tableId, isAdmin);
+
+        assertEquals(200, response.getStatusCodeValue());
+        assertEquals(mockVersions, response.getBody());
+        verify(ruleTableAccessService, times(1)).getTableVersions(eq(tableId), eq(isAdmin), anyList());
+    }
+
+    @Test
+    void testGetTableItems() {
+        String tableId = "table123";
+        String version = "v1";
+        List<Map<String, Object>> mockItems = List.of(Map.of("key", "value"));
+        when(ruleTableAccessService.getTableItems(eq(tableId), eq(version), anyList()))
+                .thenReturn(mockItems);
+
+        ResponseEntity<List<Map<String, Object>>> response =
+                ruleappController.getTableItems(mockRequest, tableId, version);
+
+        assertEquals(200, response.getStatusCodeValue());
+        assertEquals(mockItems, response.getBody());
+        verify(ruleTableAccessService, times(1)).getTableItems(eq(tableId), eq(version), anyList());
+    }
+
+    @Test
+    void testUploadExcelFile() {
+        String tableId = "table123";
+        MultipartFile mockFile = new MockMultipartFile("file", "test.xlsx",
+                MediaType.MULTIPART_FORM_DATA_VALUE, "dummy-data".getBytes());
+
+        Map<String, Object> result = Map.of("status", "success");
+        when(ruleTableAccessService.uploadExcelFile(eq(tableId), anyList(), eq(mockFile), eq("testUser")))
+                .thenReturn(result);
+
+        ResponseEntity<Map<String, Object>> response =
+                ruleappController.uploadExcelFile(mockRequest, tableId, mockFile);
+
+        assertEquals(200, response.getStatusCodeValue());
+        assertEquals(result, response.getBody());
+        verify(ruleTableAccessService, times(1))
+                .uploadExcelFile(eq(tableId), anyList(), eq(mockFile), eq("testUser"));
+    }
+}
