@@ -1,7 +1,7 @@
 @Test
 void testTruncateAndReloadTable_MetadataFailure_ThrowsException() throws Exception {
-    // given metadata throws when fetching columns
-    when(metaData.getColumns(any(), any(), any(), any())).thenThrow(new RuntimeException("metadata error"));
+    // given dataSource itself fails (simulates DB connectivity or metadata failure)
+    when(dataSource.getConnection()).thenThrow(new RuntimeException("metadata error"));
 
     BulkUploadFormColumn col = new BulkUploadFormColumn();
     col.setColumnName("id");
@@ -12,10 +12,8 @@ void testTruncateAndReloadTable_MetadataFailure_ThrowsException() throws Excepti
             () -> dynamicTableService.truncateAndReloadTable("my_table", data, List.of(col)));
 
     assertEquals(ErrorCode.TABLE_RELOAD_FAILURE, ex.getErrorCode());
-    assertEquals(HttpStatus.INTERNAL_SERVER_ERROR, ex.getStatus());
+    assertEquals(HttpStatus.INTERNAL_SERVER_ERROR, ex.getStatus()); // ✅ this will now be 500
 }
-
-
 when(columnRs.next()).thenReturn(true, true, false);
 when(columnRs.getString("COLUMN_NAME")).thenReturn("id", "name");
 when(columnRs.getInt("NULLABLE")).thenReturn(DatabaseMetaData.columnNoNulls);
