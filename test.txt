@@ -1,102 +1,146 @@
-package com.bhge.inspire.spir.service.impl;
-
-import com.bhge.inspire.opa.pojo.response.LookUpTableResponse;
-import com.bhge.inspire.opa.pojo.response.RuleAppTableVersionResponse;
-import com.bhge.inspire.opa.util.OPADataManager;
-import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Test;
-import org.mockito.*;
-import org.springframework.web.multipart.MultipartFile;
-
-import java.util.*;
+package com.bakerhughes.ruleapp.service.impl;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
 
-class RuleTableAccessServiceImplTest {
+import java.sql.Connection;
+import java.sql.DatabaseMetaData;
+import java.sql.ResultSet;
+import java.util.*;
+
+import javax.sql.DataSource;
+
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.mockito.*;
+import org.springframework.http.HttpStatus;
+import org.springframework.jdbc.core.JdbcTemplate;
+
+import com.bakerhughes.ruleapp.dto.BulkUploadFormColumn;
+import com.bakerhughes.ruleapp.exception.ErrorCode;
+import com.bakerhughes.ruleapp.exception.RuleAppServiceException;
+
+class DynamicTableServiceImplTest {
 
     @InjectMocks
-    private RuleTableAccessServiceImpl ruleTableAccessService;
+    private DynamicTableServiceImpl dynamicTableService;
 
     @Mock
-    private OPADataManager opaDataManager;
+    private JdbcTemplate jdbcTemplate;
 
     @Mock
-    private MultipartFile file;
+    private DataSource dataSource;
+
+    @Mock
+    private Connection connection;
+
+    @Mock
+    private DatabaseMetaData metaData;
+
+    @Mock
+    private ResultSet tablesRs;
+
+    @Mock
+    private ResultSet columnsRs;
 
     @BeforeEach
-    void setUp() {
+    void setup() throws Exception {
         MockitoAnnotations.openMocks(this);
+        when(dataSource.getConnection()).thenReturn(connection);
+        when(connection.getMetaData()).thenReturn(metaData);
+        when(metaData.getIdentifierQuoteString()).thenReturn("\"");
     }
 
+    // ✅ Happy Path
     @Test
-    void testGetAllowedTablesByGroups() {
-        // Arrange
-        List<String> groups = Arrays.asList("group1", "group2");
-        List<LookUpTableResponse> mockResponse = Arrays.asList(new LookUpTableResponse());
-        when(opaDataManager.getLookUpTablesByGroups(groups)).thenReturn(mockResponse);
+    void testTruncateAndReloadTable_Success() throws Exception {
+        String tableName = "EMPLOYEE";
+        List<BulkUploadFormColumn> columns = List.of(new BulkUploadFormColumn() {{
+            setColumnName("ID");
+        }});
+        List<Map<String, Object>> data = List.of(Map.of("id", 1));
 
-        // Act
-        List<LookUpTableResponse> result = ruleTableAccessService.getAllowedTablesByGroups(groups);
+        // Table exists
+        when(metaData.getTables(null, null, tableName, new String[]{"TABLE"})).thenReturn(tablesRs);
+        when(tablesRs.next()).thenReturn(true);
 
-        // Assert
-        assertNotNull(result);
-        assertEquals(1, result.size());
-        verify(opaDataManager, times(1)).getLookUpTablesByGroups(groups);
+        // Columns in metadata
+        when(metaData.getColumns(null, null, tableName, null))
+                .thenReturn(columnsRs)
+                .thenReturn(columnsRs); // called twice for nullable + all columns
+
+        when(columnsRs.next()).thenReturn(true, false);
+        when(columnsRs.getString("COLUMN_NAME")).thenReturn("ID");
+        when(columnsRs.getInt("NULLABLE")).thenReturn(DatabaseMetaData.columnNullable);
+
+        // Run method
+        dynamicTableService.truncateAndReloadTable(tableName, data, columns);
+
+        // Verify interactions
+        verify(jdbcTemplate).execute("TRUNCATE TABLE \"EMPLOYEE\"");
+        verify(jdbcTemplate).batchUpdate(
+                startsWith("INSERT INTO \"EMPLOYEE\""),
+                anyList()
+        );
     }
 
+    // ❌ Invalid table name
     @Test
-    void testGetTableVersions() {
-        // Arrange
-        String tableId = "table1";
-        boolean isAdmin = true;
-        List<String> groups = Arrays.asList("group1");
-        List<RuleAppTableVersionResponse> mockResponse = Arrays.asList(new RuleAppTableVersionResponse());
-        when(opaDataManager.getTableVersions(tableId, isAdmin)).thenReturn(mockResponse);
+    void testTruncateAndReloadTable_InvalidTableName() {
+        List<Map<String, Object>> data = List.of(Map.of("id", 1));
 
-        // Act
-        List<RuleAppTableVersionResponse> result = ruleTableAccessService.getTableVersions(tableId, isAdmin, groups);
-
-        // Assert
-        assertNotNull(result);
-        assertEquals(1, result.size());
-        verify(opaDataManager, times(1)).getTableVersions(tableId, isAdmin);
+        RuleAppServiceException ex = assertThrows(RuleAppServiceException.class, () ->
+                dynamicTableService.truncateAndReloadTable("1INVALID", data, Collections.emptyList())
+        );
+        assertEquals(HttpStatus.BAD_REQUEST, ex.getStatus());
+        assertTrue(ex.getMessage().contains("Invalid table name"));
     }
 
+    // ❌ Table not found
     @Test
-    void testGetTableItems() {
-        // Arrange
-        String tableId = "table123";
-        String version = "v1";
-        List<String> groups = Arrays.asList("groupA");
-        List<Map<String, Object>> mockResponse = Arrays.asList(Map.of("key", "value"));
-        when(opaDataManager.getTableItems(tableId, version, groups)).thenReturn(mockResponse);
+    void testTruncateAndReloadTable_TableNotFound() throws Exception {
+        when(metaData.getTables(null, null, "EMPLOYEE", new String[]{"TABLE"})).thenReturn(tablesRs);
+        when(tablesRs.next()).thenReturn(false);
 
-        // Act
-        List<Map<String, Object>> result = ruleTableAccessService.getTableItems(tableId, version, groups);
+        RuleAppServiceException ex = assertThrows(RuleAppServiceException.class, () ->
+                dynamicTableService.truncateAndReloadTable("EMPLOYEE", Collections.emptyList(), Collections.emptyList())
+        );
 
-        // Assert
-        assertNotNull(result);
-        assertEquals(1, result.size());
-        assertEquals("value", result.get(0).get("key"));
-        verify(opaDataManager, times(1)).getTableItems(tableId, version, groups);
+        assertEquals(HttpStatus.BAD_REQUEST, ex.getStatus());
+        assertTrue(ex.getMessage().contains("Table not found"));
     }
 
+    // ❌ No valid columns
     @Test
-    void testUploadExcelFile() {
-        // Arrange
-        String tableId = "table123";
-        List<String> groups = Arrays.asList("groupA", "groupB");
-        String currentUser = "testUser";
-        Map<String, Object> mockResponse = Map.of("status", "success");
-        when(opaDataManager.uploadExcelFile(tableId, groups, file, currentUser)).thenReturn(mockResponse);
+    void testTruncateAndReloadTable_NoValidColumns() throws Exception {
+        String tableName = "EMPLOYEE";
+        List<Map<String, Object>> data = List.of(Map.of("id", 1));
 
-        // Act
-        Map<String, Object> result = ruleTableAccessService.uploadExcelFile(tableId, groups, file, currentUser);
+        when(metaData.getTables(null, null, tableName, new String[]{"TABLE"})).thenReturn(tablesRs);
+        when(tablesRs.next()).thenReturn(true);
 
-        // Assert
-        assertNotNull(result);
-        assertEquals("success", result.get("status"));
-        verify(opaDataManager, times(1)).uploadExcelFile(tableId, groups, file, currentUser);
+        // Return empty column metadata
+        when(metaData.getColumns(null, null, tableName, null)).thenReturn(columnsRs);
+        when(columnsRs.next()).thenReturn(false);
+
+        RuleAppServiceException ex = assertThrows(RuleAppServiceException.class, () ->
+                dynamicTableService.truncateAndReloadTable(tableName, data, Collections.emptyList())
+        );
+
+        assertEquals(HttpStatus.BAD_REQUEST, ex.getStatus());
+        assertTrue(ex.getMessage().contains("No valid columns"));
+    }
+
+    // ❌ Unexpected SQLException handling
+    @Test
+    void testTruncateAndReloadTable_SQLExceptionHandled() throws Exception {
+        when(dataSource.getConnection()).thenThrow(new RuntimeException("DB down"));
+
+        RuleAppServiceException ex = assertThrows(RuleAppServiceException.class, () ->
+                dynamicTableService.truncateAndReloadTable("EMPLOYEE", Collections.emptyList(), Collections.emptyList())
+        );
+
+        assertEquals(HttpStatus.INTERNAL_SERVER_ERROR, ex.getStatus());
+        assertTrue(ex.getMessage().contains("Failed to truncateAndReloadTable"));
     }
 }
