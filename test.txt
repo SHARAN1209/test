@@ -1,19 +1,15 @@
-@Test
-void testTruncateAndReloadTable_MetadataFailure_ThrowsException() throws Exception {
-    // given dataSource itself fails (simulates DB connectivity or metadata failure)
-    when(dataSource.getConnection()).thenThrow(new RuntimeException("metadata error"));
+Connection mockConn = mock(Connection.class);
+DatabaseMetaData metaData = mock(DatabaseMetaData.class);
+ResultSet columnRs = mock(ResultSet.class);
+Statement stmt = mock(Statement.class);
 
-    BulkUploadFormColumn col = new BulkUploadFormColumn();
-    col.setColumnName("id");
-    List<Map<String, Object>> data = List.of(Map.of("id", 1));
+when(dataSource.getConnection()).thenReturn(mockConn);
+when(mockConn.getMetaData()).thenReturn(metaData);
+when(metaData.getColumns(any(), any(), anyString(), any())).thenReturn(columnRs);
 
-    // when / then
-    RuleAppServiceException ex = assertThrows(RuleAppServiceException.class,
-            () -> dynamicTableService.truncateAndReloadTable("my_table", data, List.of(col)));
-
-    assertEquals(ErrorCode.TABLE_RELOAD_FAILURE, ex.getErrorCode());
-    assertEquals(HttpStatus.INTERNAL_SERVER_ERROR, ex.getStatus()); // ✅ this will now be 500
-}
 when(columnRs.next()).thenReturn(true, true, false);
 when(columnRs.getString("COLUMN_NAME")).thenReturn("id", "name");
-when(columnRs.getInt("NULLABLE")).thenReturn(DatabaseMetaData.columnNoNulls);
+when(columnRs.getInt("NULLABLE")).thenReturn(DatabaseMetaData.columnNoNulls, DatabaseMetaData.columnNullable);
+
+when(mockConn.createStatement()).thenReturn(stmt);
+when(stmt.execute(anyString())).thenReturn(true);
