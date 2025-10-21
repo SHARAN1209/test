@@ -1,33 +1,15 @@
-@Test
-void testTruncateAndReloadTable_Success() throws Exception {
-    String tableName = "EMPLOYEE";
-    List<BulkUploadFormColumn> columns = List.of(new BulkUploadFormColumn() {{
-        setColumnName("ID");
-    }});
-    List<Map<String, Object>> data = List.of(Map.of("id", 1));
-
-    when(metaData.getTables(null, null, tableName, new String[]{"TABLE"}))
-        .thenReturn(tablesRs);
-    when(tablesRs.next()).thenReturn(true);
-
-    // Two distinct mocks for getColumns() calls
-    ResultSet rs1 = mock(ResultSet.class);
-    ResultSet rs2 = mock(ResultSet.class);
-
-    when(metaData.getColumns(null, null, tableName, null))
-        .thenReturn(rs1)
-        .thenReturn(rs2);
-
-    when(rs1.next()).thenReturn(true, false);
-    when(rs1.getString("COLUMN_NAME")).thenReturn("ID");
-    when(rs1.getInt("NULLABLE")).thenReturn(DatabaseMetaData.columnNullable);
-
-    when(rs2.next()).thenReturn(true, false);
-    when(rs2.getString("COLUMN_NAME")).thenReturn("ID");
-
-    // Run
-    dynamicTableService.truncateAndReloadTable(tableName, data, columns);
-
-    verify(jdbcTemplate).execute("TRUNCATE TABLE \"EMPLOYEE\"");
-    verify(jdbcTemplate).batchUpdate(startsWith("INSERT INTO \"EMPLOYEE\""), anyList());
-}
+return switch (cell.getCellType()) {
+    case STRING -> cell.getStringCellValue().trim();
+    case NUMERIC -> {
+        if (DateUtil.isCellDateFormatted(cell)) {
+            yield cell.getDateCellValue().toString();
+        } else {
+            double numericValue = cell.getNumericCellValue();
+            String value = (numericValue == Math.floor(numericValue))
+                    ? String.valueOf((long) numericValue)
+                    : String.valueOf(numericValue);
+            yield value;
+        }
+    }
+    default -> "";
+};
