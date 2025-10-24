@@ -1,15 +1,71 @@
-return switch (cell.getCellType()) {
-    case STRING -> cell.getStringCellValue().trim();
-    case NUMERIC -> {
-        if (DateUtil.isCellDateFormatted(cell)) {
-            yield cell.getDateCellValue().toString();
-        } else {
-            double numericValue = cell.getNumericCellValue();
-            String value = (numericValue == Math.floor(numericValue))
-                    ? String.valueOf((long) numericValue)
-                    : String.valueOf(numericValue);
-            yield value;
-        }
-    }
-    default -> "";
-};
+🧾 False Positive Justification – SQL Injection
+Finding:
+
+SQL Injection (Path 1) – jdbcTemplate.execute("TRUNCATE TABLE " + quotedTable)
+
+SQL Injection (Path 2) – jdbcTemplate.batchUpdate(insertSql, batchArgs)
+
+Justification Summary:
+
+This is a false positive.
+The application strictly validates and sanitizes all dynamic identifiers (such as table names and column names) before they are ever used in any SQL statement.
+No user-controlled data can reach the query unless it passes through this validation and metadata verification.
+
+Detailed Explanation:
+
+Input Validation
+
+The variable tableName is validated using a strict regex:
+
+private static final String IDENTIFIER_REGEX = "^[A-Za-z][A-Za-z0-9_]*$";
+
+
+This pattern allows only letters, numbers, and underscores — no SQL special characters (;, ', ", --, etc.).
+
+isValidIdentifier(tableName) ensures the name is syntactically valid before any database access.
+
+Database Metadata Verification
+
+After regex validation, the method tableExists(metaData, tableName) confirms that the table actually exists in the database using JDBC metadata APIs (no dynamic SQL involved in this check).
+
+Quoting and Escaping
+
+The table name and column names are safely quoted using the database-specific quote character obtained from:
+
+String quote = conn.getMetaData().getIdentifierQuoteString();
+
+
+This ensures that even if the table or column names contain reserved words, they are safely escaped.
+
+No Direct Data Concatenation
+
+All user data values are inserted using parameterized queries with ? placeholders:
+
+jdbcTemplate.batchUpdate(insertSql, batchArgs);
+
+
+There is no concatenation of user-supplied data into SQL strings.
+
+The TRUNCATE TABLE Statement
+
+Although TRUNCATE TABLE requires a static table name (placeholders not supported), the table name is validated and checked against the actual database metadata before execution.
+
+Therefore, it is impossible for a malicious value to reach this query.
+
+Controlled Code Context
+
+The method truncateAndReloadTable is an internal service method, not directly exposed to end-users.
+It is called only from trusted controller logic (uploadExcelFile) that passes validated parameters.
+
+Security Impact:
+
+No risk of SQL Injection.
+
+The dynamic elements are validated, whitelisted, and verified against the database.
+
+All data values are parameterized and never concatenated.
+
+Recommendation for Closure:
+
+Mark the findings as "False Positive – Proper Input Validation and Metadata Verification in Place".
+The implementation adheres to secure coding standards for SQL injection prevention as per OWASP and CERT guidelines.
